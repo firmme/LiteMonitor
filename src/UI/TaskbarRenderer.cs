@@ -1,4 +1,5 @@
 using LiteMonitor.src.Core;
+using LiteMonitor.src.UI.Helpers;
 using System.Drawing.Text;
 
 namespace LiteMonitor
@@ -10,8 +11,11 @@ namespace LiteMonitor
     {
         //private static readonly Settings _settings = Settings.Load();
         
-        // 字体缓存 - 直接初始化，避免每次渲染都创建字体
+        // 字体缓存 - 由本类完全拥有 (不进入 UIUtils 共享缓存，避免被 ClearBrushCache 释放)
         private static Font? _cachedFont = null;
+
+        // 供布局测量复用，保证测量字体与渲染字体完全一致
+        public static Font? CachedFont => _cachedFont;
 
         // 浅色主题
         private static readonly Color LABEL_LIGHT = Color.FromArgb(20, 20, 20);
@@ -31,9 +35,13 @@ namespace LiteMonitor
 
         // ★★★ [新增] 极简的核心：手动刷新缓存 ★★★
         // 在 UIController 初始化或配置变更时调用它
-        public static void ReloadStyle(Settings cfg)
+        // dpi: 任务栏所在显示器的 DPI (<=0 时自动探测)，保证字体随 DPI 变化
+        public static void ReloadStyle(Settings cfg, float dpi = 0)
         {     
             var s = cfg.GetStyle();
+
+            if (dpi <= 0f) dpi = TaskbarWinHelper.GetTaskbarDpi();
+            if (dpi <= 0f) dpi = 96f;
 
             // ★★★ 修复：先释放旧字体资源，防止 GDI 句柄泄漏 ★★★
             if (_cachedFont != null)
@@ -42,8 +50,8 @@ namespace LiteMonitor
                 _cachedFont = null;
             }
 
-            // 无论开关怎么变，这里拿到的永远是正确参数
-            _cachedFont = UIUtils.GetFont(s.Font, s.Size, s.Bold);
+            // 无论开关怎么变，这里拿到的永远是正确参数 (按目标 DPI 生成像素字体，由本类拥有)
+            _cachedFont = UIUtils.CreateFont(s.Font, s.Size, s.Bold, dpi);
 
             // 颜色依然允许自定义
             _useCustom = cfg.TaskbarCustomStyle;

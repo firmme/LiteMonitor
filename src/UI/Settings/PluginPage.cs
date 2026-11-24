@@ -142,7 +142,7 @@ namespace LiteMonitor.src.UI.SettingsPage
             hintRow.Dock = DockStyle.Top;
             _container.Controls.Add(hintRow);
             
-            var hintSpacer = new Panel { Dock = DockStyle.Top, Height = 5, BackColor = Color.Transparent };
+            var hintSpacer = new Panel { Dock = DockStyle.Top, Height = 5 };
             _container.Controls.Add(hintSpacer);
             
             if (instances == null || instances.Count == 0)
@@ -179,8 +179,7 @@ namespace LiteMonitor.src.UI.SettingsPage
             var spacer = new Panel 
             { 
                 Dock = DockStyle.Top, 
-                Height = 40, 
-                BackColor = Color.Transparent 
+                Height = 40
             };
             _container.Controls.Add(spacer);
             _container.Controls.SetChildIndex(spacer, 0); // Force to be the last docked item (Bottom)
@@ -447,7 +446,7 @@ namespace LiteMonitor.src.UI.SettingsPage
         {
             // Use a transparent spacer instead of wrapper to reduce nesting depth
             // This helps prevent "Unable to set Win32 parent" errors caused by deep nesting
-            var spacer = new Panel { Dock = DockStyle.Top, Height = 10, BackColor = Color.Transparent };
+            var spacer = new Panel { Dock = DockStyle.Top, Height = 10 };
             
             _container.Controls.Add(spacer);
             _container.Controls.SetChildIndex(spacer, 0);

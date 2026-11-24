@@ -133,7 +133,7 @@ namespace LiteMonitor.src.UI.SettingsPage
 
         private void UpdateBtnStyle(Button btn, bool active)
         {
-            btn.BackColor = active ? UIColors.Primary : Color.Transparent;
+            btn.BackColor = active ? UIColors.Primary : (btn.Parent?.BackColor ?? UIColors.MainBg);
             btn.ForeColor = active ? Color.White : UIColors.TextSub;
         }
 
@@ -273,7 +273,7 @@ namespace LiteMonitor.src.UI.SettingsPage
                 UpdateHeaderLayout();
 
                 var controlsToAdd = new List<Control>();
-                var spacer = new Panel { Dock = DockStyle.Top, Height = UIUtils.S(30), BackColor = Color.Transparent };
+                var spacer = new Panel { Dock = DockStyle.Top, Height = UIUtils.S(30) };
                 controlsToAdd.Add(spacer);
 
                 if (_isTaskbarTab)

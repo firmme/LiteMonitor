@@ -147,6 +147,7 @@
     "TaskbarShow": "Mostrar",
     "TaskbarSingleLine": "Una línea",
     "TaskbarHoverShowAll": "Detalles al pasar",
+    "TaskbarHideOnOverflow": "Ocultar si falta espacio",
     "TaskbarStyle": "Estilo",
     "TaskbarMonitor": "Pantalla",
     "TaskbarStyleBold": "Grande",

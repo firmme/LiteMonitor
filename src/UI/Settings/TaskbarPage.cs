@@ -116,6 +116,7 @@ namespace LiteMonitor.src.UI.SettingsPage
 
             group.AddToggle(this, "Menu.TaskbarSingleLine", () => Config?.TaskbarSingleLine ?? false, v => { if(Config!=null) Config.TaskbarSingleLine = v; });
             group.AddToggle(this, "Menu.TaskbarHoverShowAll", () => Config?.TaskbarHoverShowAll ?? false, v => { if (Config != null) Config.TaskbarHoverShowAll = v; });
+            group.AddToggle(this, "Menu.TaskbarHideOnOverflow", () => Config?.TaskbarHideOnOverflow ?? false, v => { if (Config != null) Config.TaskbarHideOnOverflow = v; });
             group.AddToggle(this, "Menu.ClickThrough", () => Config?.TaskbarClickThrough ?? false, v => { if(Config!=null) Config.TaskbarClickThrough = v; });
            
             // Monitor Selection

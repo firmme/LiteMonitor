@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using LiteMonitor.src.Core; // 确保引用了 UIUtils
 using LiteMonitor.src.UI.SettingsPage;
@@ -81,7 +82,7 @@ namespace LiteMonitor.src.UI.Controls
             var rightBox = new FlowLayoutPanel {
                 AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 FlowDirection = FlowDirection.LeftToRight, WrapContents = false, 
-                BackColor = Color.Transparent, Padding = new Padding(0)
+                Padding = new Padding(0)
             };
 
             // Inputs
@@ -309,7 +310,6 @@ namespace LiteMonitor.src.UI.Controls
         {
             // ★★★ 修改：Size/Padding 缩放
             this.Size = new Size(UIUtils.S(width), UIUtils.S(26)); 
-            this.BackColor = Color.Transparent;
             this.Padding = UIUtils.S(new Padding(0, 2, 0, 3)); 
             this.Cursor = Cursors.IBeam;
 
@@ -622,7 +622,7 @@ namespace LiteMonitor.src.UI.Controls
             } 
             else if (dashed)
             {
-                BackColor = Color.Transparent;
+                // 不使用透明背景 (透明控件在 AutoScroll 滚动时会产生撕裂/残影)
                 ForeColor = UIColors.TextSub;
                 FlatAppearance.BorderSize = 0;
             }
@@ -646,7 +646,7 @@ namespace LiteMonitor.src.UI.Controls
             }
         }
     }
-    public class LiteNavBtn : Button { private bool _isActive; public bool IsActive { get => _isActive; set { _isActive = value; Invalidate(); } } public LiteNavBtn(string text) { Text = "  " + text; Size = new Size(UIUtils.S(150), UIUtils.S(40)); FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0; TextAlign = ContentAlignment.MiddleLeft; Font = new Font("Microsoft YaHei UI", 10F); Cursor = Cursors.Hand; Margin = UIUtils.S(new Padding(5, 2, 5, 2)); BackColor = UIColors.SidebarBg; ForeColor = UIColors.TextMain; } protected override void OnPaint(PaintEventArgs e) { Color bg = _isActive ? UIColors.NavSelected : (ClientRectangle.Contains(PointToClient(Cursor.Position)) ? UIColors.NavHover : UIColors.SidebarBg); using (var b = new SolidBrush(bg)) e.Graphics.FillRectangle(b, ClientRectangle); if (_isActive) { using (var b = new SolidBrush(UIColors.Primary)) e.Graphics.FillRectangle(b, 0, UIUtils.S(8), UIUtils.S(3), Height - UIUtils.S(16)); Font = new Font(Font, FontStyle.Bold); } else { Font = new Font(Font, FontStyle.Regular); } TextRenderer.DrawText(e.Graphics, Text, Font, new Point(UIUtils.S(12), UIUtils.S(9)), UIColors.TextMain); } protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); Invalidate(); } protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); Invalidate(); } }
+    public class LiteNavBtn : Button { private static readonly Font _fontBold = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold); private static readonly Font _fontRegular = new Font("Microsoft YaHei UI", 10F, FontStyle.Regular); private bool _isActive; public bool IsActive { get => _isActive; set { _isActive = value; Invalidate(); } } public LiteNavBtn(string text) { DoubleBuffered = true; Text = "  " + text; Size = new Size(UIUtils.S(150), UIUtils.S(40)); FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0; TextAlign = ContentAlignment.MiddleLeft; Font = _fontRegular; Cursor = Cursors.Hand; Margin = UIUtils.S(new Padding(5, 2, 5, 2)); BackColor = UIColors.SidebarBg; ForeColor = UIColors.TextMain; } protected override void OnPaint(PaintEventArgs e) { Color bg = _isActive ? UIColors.NavSelected : (ClientRectangle.Contains(PointToClient(Cursor.Position)) ? UIColors.NavHover : UIColors.SidebarBg); using (var b = new SolidBrush(bg)) e.Graphics.FillRectangle(b, ClientRectangle); if (_isActive) { using (var b = new SolidBrush(UIColors.Primary)) e.Graphics.FillRectangle(b, 0, UIUtils.S(8), UIUtils.S(3), Height - UIUtils.S(16)); } TextRenderer.DrawText(e.Graphics, Text, _isActive ? _fontBold : _fontRegular, new Point(UIUtils.S(12), UIUtils.S(9)), UIColors.TextMain); } protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); Invalidate(); } protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); Invalidate(); } }
     public class LiteSortBtn : Button { public LiteSortBtn(string txt) { Text = txt; Size = new Size(UIUtils.S(24), UIUtils.S(24)); FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0; BackColor = Color.FromArgb(245, 245, 245); ForeColor = Color.DimGray; Cursor = Cursors.Hand; Font = new Font("Microsoft YaHei UI", 7F, FontStyle.Bold); Margin = new Padding(0); } }
     
     // ★★★ New: Header Button (Variable Width) ★★★
@@ -711,6 +711,39 @@ namespace LiteMonitor.src.UI.Controls
                 return;
             }
             base.WndProc(ref m);
+        }
+
+        // ★★★ [滚动撕裂修复] ★★★
+        // 滚动时子控件被移动、而背景重绘是异步的，两帧不同步就会出现一条横向“撕裂”。
+        // 滚动后立即同步重绘自身及所有子控件，保证同一帧内完成，彻底消除撕裂。
+        [DllImport("user32.dll")]
+        private static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
+
+        private const uint RDW_INVALIDATE = 0x0001;
+        private const uint RDW_UPDATENOW = 0x0100;
+        private const uint RDW_ALLCHILDREN = 0x0080;
+
+        private void ForceRepaintNow()
+        {
+            if (!this.AutoScroll || !this.IsHandleCreated) return;
+            try
+            {
+                RedrawWindow(this.Handle, IntPtr.Zero, IntPtr.Zero,
+                    RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+            }
+            catch { }
+        }
+
+        protected override void OnScroll(ScrollEventArgs se)
+        {
+            base.OnScroll(se);
+            ForceRepaintNow();
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            ForceRepaintNow();
         }
     }
 }

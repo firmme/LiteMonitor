@@ -25,6 +25,10 @@ namespace LiteMonitor
         private DateTime _lastFindHandleTime = DateTime.MinValue;
         private string _lastLayoutSignature = "";
         private readonly TaskbarTooltipHelper _tooltipHelper;
+
+        // ★★★ DPI 跟踪：任务栏所在显示器 DPI 变化时刷新字体与布局 ★★★
+        private int _taskbarDpi;
+        private bool _hiddenByOverflow;
         
         // 公开属性
         public string TargetDevice { get; private set; } = "";
@@ -77,7 +81,11 @@ namespace LiteMonitor
 
         public void ReloadLayout()
         {
-            _layout = new HorizontalLayout(ThemeManager.Current, 300, LayoutMode.Taskbar, _cfg);
+            // 重新读取任务栏 DPI，保证字体/间距跟随显示器 DPI
+            _taskbarDpi = _bizHelper.GetTaskbarDpi();
+            TaskbarRenderer.ReloadStyle(_cfg, _taskbarDpi);
+
+            _layout = new HorizontalLayout(ThemeManager.Current, 300, LayoutMode.Taskbar, _cfg, _taskbarDpi);
             _lastLayoutSignature = ""; // 重置签名，强制重算
             _winHelper.ApplyLayeredStyle(_bizHelper.TransparentKey, _cfg.TaskbarClickThrough);
             _bizHelper.CheckTheme(true);
@@ -182,6 +190,17 @@ namespace LiteMonitor
                 _lastFindHandleTime = DateTime.Now;
             }
 
+            // ★★★ DPI 变更检测：显示器缩放变化后刷新字体缓存与布局，修复字体不跟随 DPI 的问题 ★★★
+            int currentDpi = _bizHelper.GetTaskbarDpi();
+            if (currentDpi > 0 && currentDpi != _taskbarDpi)
+            {
+                _taskbarDpi = currentDpi;
+                UIUtils.ClearFontCache();
+                TaskbarRenderer.ReloadStyle(_cfg, currentDpi);
+                _layout = new HorizontalLayout(ThemeManager.Current, Width, LayoutMode.Taskbar, _cfg, currentDpi);
+                _lastLayoutSignature = "";
+            }
+
             if (Math.Abs(Environment.TickCount) % 5000 < _cfg.RefreshMs) _bizHelper.CheckTheme();
 
             // [Fix Part 1] 防空数据保护
@@ -222,6 +241,29 @@ namespace LiteMonitor
                 }
             }
             
+            // ★★★ 空间不足时自动隐藏任务栏组件 (低分辨率 / 任务栏可用区域不足) ★★★
+            if (_cfg.TaskbarHideOnOverflow)
+            {
+                if (!_bizHelper.HasEnoughSpace(Width, Height))
+                {
+                    if (Visible) Hide();
+                    _hiddenByOverflow = true;
+                    return; // 空间不足时保持隐藏，等待空间恢复
+                }
+
+                if (_hiddenByOverflow)
+                {
+                    _hiddenByOverflow = false;
+                    if (!Visible) Show();
+                }
+            }
+            else if (_hiddenByOverflow)
+            {
+                // 关闭该设置后恢复显示
+                _hiddenByOverflow = false;
+                if (!Visible) Show();
+            }
+
             _bizHelper.UpdatePlacement(Width);
             
             _tooltipHelper.UpdateContent();

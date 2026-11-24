@@ -124,6 +124,67 @@ namespace LiteMonitor.src.Core
             }
         }
 
+        // ============================================================
+        // 3.1 DPI 感知字体 (用于任务栏组件等需要跟随显示器 DPI 的场景)
+        // ============================================================
+        /// <summary>
+        /// 按目标显示器 DPI 创建一个"调用方拥有"的字体 (不进入共享缓存)。
+        /// size 为磅值 (pt)，内部换算为像素并使用 GraphicsUnit.Pixel，
+        /// 这样即使进程为 SystemAware，也能保证字体大小与目标显示器一致。
+        /// 注意：调用方负责在不再使用时 Dispose，避免与 ClearBrushCache 冲突导致使用已释放字体。
+        /// </summary>
+        public static Font CreateFont(string familyName, float sizePoints, bool bold, float dpi)
+        {
+            if (dpi <= 0f) dpi = 96f;
+
+            // pt -> px (96 DPI 下 1pt = 96/72 px)
+            float pixel = sizePoints * dpi / 72f;
+            if (pixel < 1f) pixel = 1f;
+
+            var style = bold ? FontStyle.Bold : FontStyle.Regular;
+            try
+            {
+                return new Font(familyName, pixel, style, GraphicsUnit.Pixel);
+            }
+            catch
+            {
+                return new Font(SystemFonts.DefaultFont.FontFamily, pixel, style, GraphicsUnit.Pixel);
+            }
+        }
+
+        public static void ClearFontCache()
+        {
+            lock (_brushLock)
+            {
+                foreach (var f in _fontCache.Values)
+                {
+                    try { f.Dispose(); } catch { }
+                }
+                _fontCache.Clear();
+            }
+        }
+
+        // ============================================================
+        // 3.2 递归开启双缓冲 (用于设置页等自定义绘制容器，消除滚动时子控件重绘撕裂)
+        // ============================================================
+        private static readonly System.Reflection.PropertyInfo? _doubleBufferedProp =
+            typeof(System.Windows.Forms.Control).GetProperty(
+                "DoubleBuffered",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+
+        public static void EnableDoubleBuffering(System.Windows.Forms.Control? root)
+        {
+            if (root == null || _doubleBufferedProp == null) return;
+
+            void Apply(System.Windows.Forms.Control c)
+            {
+                try { _doubleBufferedProp.SetValue(c, true, null); } catch { }
+                foreach (System.Windows.Forms.Control child in c.Controls) Apply(child);
+            }
+
+            Apply(root);
+        }
+
         public static void ClearBrushCache()
         {
             lock (_brushLock)

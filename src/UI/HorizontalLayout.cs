@@ -23,19 +23,24 @@ namespace LiteMonitor
 
         // DPI
         private readonly float _dpiScale;
+        private readonly float _targetDpi;
 
         public int PanelWidth { get; private set; }
 
-        public HorizontalLayout(Theme t, int initialWidth, LayoutMode mode, Settings? settings = null)
+        public HorizontalLayout(Theme t, int initialWidth, LayoutMode mode, Settings? settings = null, float targetDpi = 0)
         {
             _t = t;
             _mode = mode;
             _settings = settings ?? Settings.Load();
 
-            using (var g = Graphics.FromHwnd(IntPtr.Zero))
+            // targetDpi <= 0 时回退到桌面 DPI；任务栏模式会显式传入任务栏所在显示器的 DPI
+            if (targetDpi <= 0f)
             {
-                _dpiScale = g.DpiX / 96f;
+                using var g = Graphics.FromHwnd(IntPtr.Zero);
+                targetDpi = g.DpiX;
             }
+            _targetDpi = targetDpi <= 0f ? 96f : targetDpi;
+            _dpiScale = _targetDpi / 96f;
 
             _padding = t.Layout.Padding;
 
@@ -172,8 +177,10 @@ namespace LiteMonitor
 
                 if (_mode == LayoutMode.Taskbar)
                 {
-                    valFont = new Font(s.Font, s.Size, s.Bold ? FontStyle.Bold : FontStyle.Regular);
-                    disposeFont = true;
+                    // 复用渲染器拥有的字体，保证测量与绘制完全一致 (不可释放)
+                    var cached = TaskbarRenderer.CachedFont;
+                    valFont = cached ?? UIUtils.CreateFont(s.Font, s.Size, s.Bold, _targetDpi);
+                    disposeFont = cached == null;
                 }
                 else
                 {
@@ -204,10 +211,11 @@ namespace LiteMonitor
 
                 if (_mode == LayoutMode.Taskbar)
                 {
-                    var fs = s.Bold ? FontStyle.Bold : FontStyle.Regular;
-                    var f = new Font(s.Font, s.Size, fs);
+                    // 复用渲染器拥有的字体，保证测量与绘制完全一致 (不可释放)
+                    var cached = TaskbarRenderer.CachedFont;
+                    var f = cached ?? UIUtils.CreateFont(s.Font, s.Size, s.Bold, _targetDpi);
                     labelFont = f; valueFont = f;
-                    disposeFont = true;
+                    disposeFont = cached == null;
                 }
                 else
                 {

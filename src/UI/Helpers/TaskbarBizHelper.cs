@@ -113,6 +113,52 @@ namespace LiteMonitor.src.UI.Helpers
             return _taskbarRect.Height > _taskbarRect.Width;
         }
 
+        /// <summary>
+        /// 获取当前任务栏所在显示器的 DPI
+        /// </summary>
+        public int GetTaskbarDpi()
+        {
+            if (_hTaskbar != IntPtr.Zero)
+            {
+                return TaskbarWinHelper.GetDpiForWindowHandle(_hTaskbar);
+            }
+            return TaskbarWinHelper.GetTaskbarDpi();
+        }
+
+        /// <summary>
+        /// 判断当前任务栏是否有足够空间完整显示监控组件。
+        /// 空间不足 (如低分辨率 / 任务栏可用区域太窄) 时返回 false。
+        /// </summary>
+        public bool HasEnoughSpace(int panelWidth, int panelHeight)
+        {
+            if (_hTaskbar == IntPtr.Zero || _taskbarRect.IsEmpty) return true;
+
+            const int margin = 12;
+
+            if (IsVertical())
+            {
+                int availHeight = _taskbarRect.Height;
+                if (_hTray != IntPtr.Zero &&
+                    _winHelper.GetWindowRectWrapper(_hTray, out Rectangle tray) &&
+                    tray.Top > _taskbarRect.Top && tray.Top <= _taskbarRect.Bottom)
+                {
+                    availHeight = tray.Top - _taskbarRect.Top;
+                }
+                return panelHeight + margin <= availHeight;
+            }
+            else
+            {
+                int availWidth = _taskbarRect.Width;
+                if (_hTray != IntPtr.Zero &&
+                    _winHelper.GetWindowRectWrapper(_hTray, out Rectangle tray) &&
+                    tray.Left > _taskbarRect.Left && tray.Left <= _taskbarRect.Right)
+                {
+                    availWidth = tray.Left - _taskbarRect.Left;
+                }
+                return panelWidth + margin <= availWidth;
+            }
+        }
+
         public void UpdatePlacement(int panelWidth)
         {
             if (_hTaskbar == IntPtr.Zero) return;
@@ -207,8 +253,9 @@ namespace LiteMonitor.src.UI.Helpers
             int w = _taskbarRect.Width;
             if (w < 20) w = 60; 
 
-            int itemHeight = (int)(s.Size * 1.5f + 6); 
-            if (itemHeight < 20) itemHeight = 20;
+            float dpiScale = GetTaskbarDpi() / 96f;
+            int itemHeight = (int)((s.Size * 1.5f + 6) * dpiScale);
+            if (itemHeight < (int)(20 * dpiScale)) itemHeight = (int)(20 * dpiScale);
 
             int margin = Math.Max(0, s.Inner / 2);
             int contentWidth = w - (margin * 2);

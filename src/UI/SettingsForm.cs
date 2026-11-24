@@ -196,6 +196,9 @@ namespace LiteMonitor.src.UI
 
                     _pnlContent.Controls.Add(targetPage);
                     targetPage.OnShow();
+
+                    // [性能修复] 递归开启双缓冲，消除自定义绘制控件滚动时的重绘撕裂
+                    UIUtils.EnableDoubleBuffering(targetPage);
                 }
                 finally
                 {

@@ -147,6 +147,7 @@
     "TaskbarShow": "Показывать",
     "TaskbarSingleLine": "Одна строка",
     "TaskbarHoverShowAll": "Детали при наведении",
+    "TaskbarHideOnOverflow": "Скрыть при нехватке места",
     "TaskbarStyle": "Стиль",
     "TaskbarMonitor": "Экран",
     "TaskbarStyleBold": "Крупно",

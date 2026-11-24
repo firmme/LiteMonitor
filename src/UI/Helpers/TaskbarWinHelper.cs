@@ -322,6 +322,23 @@ namespace LiteMonitor.src.UI.Helpers
             return 96;
         }
 
+        /// <summary>
+        /// 获取指定窗口句柄所在显示器的 DPI (失败时回退到系统任务栏 DPI / 96)
+        /// </summary>
+        public static int GetDpiForWindowHandle(IntPtr hWnd)
+        {
+            if (hWnd != IntPtr.Zero)
+            {
+                try
+                {
+                    uint dpi = GetDpiForWindow(hWnd);
+                    if (dpi > 0) return (int)dpi;
+                }
+                catch { }
+            }
+            return GetTaskbarDpi();
+        }
+
         public static int GetWidgetsWidth()
         {
             int dpi = GetTaskbarDpi();
