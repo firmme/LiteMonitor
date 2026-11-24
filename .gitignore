@@ -1,0 +1,30 @@
+# .NET build and publish output (all projects)
+[Bb]in/
+[Oo]bj/
+/artifacts/
+
+# Local IDE settings and caches
+.vs/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.sln.iml
+
+# Local publish settings (may contain credentials)
+*.pubxml.user
+*.publishsettings
+
+# Test and coverage output
+[Tt]est[Rr]esult*/
+*.coverage
+*.coveragexml
+
+# Editor backups and operating system metadata
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
