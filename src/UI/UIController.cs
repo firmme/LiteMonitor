@@ -51,13 +51,7 @@ namespace LiteMonitor
             ApplyTheme(_cfg.Skin);
         }
 
-        public float GetCurrentDpiScale()
-        {
-            using (Graphics g = _form.CreateGraphics())
-            {
-                return g.DpiX / 96f;
-            }
-        }
+        public float GetCurrentDpiScale() => _form.DeviceDpi / 96f;
 
         public void ApplyTheme(string name, bool retainData = false)
         {
@@ -95,8 +89,6 @@ namespace LiteMonitor
                 _form.ClientSize = new Size(t.Layout.Width, _form.ClientSize.Height);
             }
 
-            TaskbarRenderer.ReloadStyle(_cfg);
-
             _layout = new UILayout(t);
             _hxLayout = null;
 
@@ -118,6 +110,7 @@ namespace LiteMonitor
             _form.BackColor = ThemeManager.ParseColor(t.Color.Background);
 
             _timer.Interval = Math.Max(80, _cfg.RefreshMs);
+            (_form as MainForm)?.ReloadTaskbarLayout();
             _form.Invalidate();
             _form.Update();
         }
@@ -141,7 +134,7 @@ namespace LiteMonitor
             // === 横屏模式 ===
             if (_cfg.HorizontalMode)
             {
-                _hxLayout ??= new HorizontalLayout(t, _form.Width, LayoutMode.Horizontal);
+                _hxLayout ??= new HorizontalLayout(t, _form.Width, LayoutMode.Horizontal, _cfg, _form.DeviceDpi);
 
                 // [通用方案] 动态检测是否需要重新计算布局
                 // 移至 Tick() 中低频检查，避免 Render 高频调用

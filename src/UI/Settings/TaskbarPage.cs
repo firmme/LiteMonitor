@@ -88,12 +88,6 @@ namespace LiteMonitor.src.UI.SettingsPage
             }
         }
 
-        public override void Save()
-        {
-            base.Save();
-            if(Config != null) TaskbarRenderer.ReloadStyle(Config);
-        }
-
         private void CreateGeneralGroup()
         {
             var group = new LiteSettingsGroup(LanguageManager.T("Menu.TaskbarSettings"));

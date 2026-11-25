@@ -13,6 +13,7 @@ namespace LiteMonitor.src.UI.Helpers
     public class TaskbarStrategyWin10 : ITaskbarStrategy
     {
         private readonly Form _form;
+        private IntPtr _taskbarHandle;
         
         // 关键句柄
         private IntPtr _hReBar = IntPtr.Zero;
@@ -28,7 +29,7 @@ namespace LiteMonitor.src.UI.Helpers
 
         // 优化配置
         private const int GAP_TOLERANCE = 1; // 容忍 1px 的误差，防止反复重绘造成的闪烁
-        public bool IsReady => _hReBar != IntPtr.Zero && _hMin != IntPtr.Zero;
+        public bool IsReady => IsWindow(_hReBar) && IsWindow(_hMin);
 
         public bool HasInternalLayout => true;
 
@@ -54,25 +55,24 @@ namespace LiteMonitor.src.UI.Helpers
 
         public IntPtr GetExpectedParent(IntPtr taskbarHandle)
         {
+            if (taskbarHandle != _taskbarHandle || !IsReady) InitializeHandles(taskbarHandle);
             if (IsReady) return _hReBar;
             return taskbarHandle; // 如果初始化失败，回退到 Taskbar
         }
 
-        public void SetPosition(IntPtr taskbarHandle, int left, int top, int w, int h, int manualOffset, bool alignLeft)
+        public bool SetPosition(IntPtr taskbarHandle, int left, int top, int w, int h, int manualOffset, bool alignLeft)
         {
-            // 确保句柄已初始化
-            if (!IsReady) InitializeHandles(taskbarHandle);
+            IntPtr parent = GetParent(_form.Handle);
+            if (parent != GetExpectedParent(taskbarHandle)) return false;
 
-            if (TryAdjustLayout(w, h, manualOffset, alignLeft, out int win10X, out int win10Y))
+            if (parent == _hReBar && TryAdjustLayout(w, h, manualOffset, alignLeft, out int win10X, out int win10Y))
             {
-                SetWindowPos(_form.Handle, IntPtr.Zero, win10X, win10Y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+                return SetWindowPos(_form.Handle, IntPtr.Zero, win10X, win10Y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
             }
-            else
-            {
-                // 如果调整失败（例如找不到句柄），回退到简单定位
-                // 注意：这里也应该应用 manualOffset，但通常 TaskbarBizHelper 对于非 internal layout 已经计算了
-                SetWindowPos(_form.Handle, IntPtr.Zero, left, top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
-            }
+
+            POINT point = new POINT { X = left, Y = top };
+            return ScreenToClient(parent, ref point) &&
+                SetWindowPos(_form.Handle, IntPtr.Zero, point.X, point.Y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
         }
 
         public void Restore()
@@ -87,6 +87,10 @@ namespace LiteMonitor.src.UI.Helpers
 
         private void InitializeHandles(IntPtr hTaskbar)
         {
+            IntPtr previousReBar = _hReBar;
+            IntPtr previousTaskList = _hMin;
+            _taskbarHandle = hTaskbar;
+            _hMin = IntPtr.Zero;
             // Win10 结构：Shell_TrayWnd -> ReBarWindow32 -> MSTaskSwWClass
             _hReBar = FindWindowEx(hTaskbar, IntPtr.Zero, "ReBarWindow32", null);
             if (_hReBar == IntPtr.Zero)
@@ -97,6 +101,12 @@ namespace LiteMonitor.src.UI.Helpers
                 _hMin = FindWindowEx(_hReBar, IntPtr.Zero, "MSTaskSwWClass", null);
                 if (_hMin == IntPtr.Zero)
                     _hMin = FindWindowEx(_hReBar, IntPtr.Zero, "MSTaskListWClass", null); 
+            }
+
+            if (_hReBar != previousReBar || _hMin != previousTaskList)
+            {
+                _lastSqueezedWidth = -1;
+                _lastSqueezedHeight = -1;
             }
         }
 
@@ -266,7 +276,7 @@ namespace LiteMonitor.src.UI.Helpers
                     
                     bool isVertical = rcBar.Height > rcBar.Width;
 
-                    if (isVertical)
+                    if (isVertical && _lastSqueezedHeight > 0 && Math.Abs(rcMin.Height - _lastSqueezedHeight) <= GAP_TOLERANCE)
                     {
                          // 垂直恢复
                          int currentRelTop = rcMin.Top - rcBar.Top;
@@ -277,7 +287,7 @@ namespace LiteMonitor.src.UI.Helpers
                          if (originalHeight > 0 && originalRelTop >= 0)
                             MoveWindow(_hMin, 0, originalRelTop, rcMin.Width, originalHeight, true);
                     }
-                    else
+                    else if (!isVertical && _lastSqueezedWidth > 0 && Math.Abs(rcMin.Width - _lastSqueezedWidth) <= GAP_TOLERANCE)
                     {
                         // 水平恢复
                         int currentRelLeft = rcMin.Left - rcBar.Left;

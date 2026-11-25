@@ -30,45 +30,12 @@ namespace LiteMonitor.src.UI.Helpers
             TaskbarWinHelper.ApplyChildWindowStyle(_form.Handle);
         }
 
-        public void SetPosition(IntPtr taskbarHandle, int left, int top, int w, int h, int manualOffset, bool alignLeft)
+        public bool SetPosition(IntPtr taskbarHandle, int left, int top, int w, int h, int manualOffset, bool alignLeft)
         {
-            // Win11 模式下，位置由外部业务逻辑计算 (TaskbarBizHelper) 且已包含 manualOffset，
-            // 这里只负责转换坐标系，忽略 manualOffset 参数以避免重复偏移。
-            // 如果已经 Attach，需要将屏幕坐标转换为 Client 坐标
-            
-            IntPtr currentParent = GetParent(_form.Handle);
-            bool isAttached = (currentParent == taskbarHandle);
-
-            int finalX = left;
-            int finalY = top;
-
-            if (isAttached)
-            {
-                // [Fix #292] Use GetWindowRect for manual relative coordinate calculation
-                // This avoids potential ScreenToClient drift issues on multi-monitor setups during startup
-                // ScreenToClient relies on the window's internal state which might be unstable during init
-                if (GetWindowRect(taskbarHandle, out RECT parentRect))
-                {
-                    finalX = left - parentRect.left;
-                    finalY = top - parentRect.top;
-                }
-                else
-                {
-                    // Fallback mechanism
-                    POINT pt = new POINT { X = left, Y = top };
-                    ScreenToClient(taskbarHandle, ref pt);
-                    finalX = pt.X;
-                    finalY = pt.Y;
-                }
-
-                SetWindowPos(_form.Handle, IntPtr.Zero, finalX, finalY, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
-            }
-            else
-            {
-                // 如果意外脱离，尝试使用 HWND_TOPMOST 保持可见
-                IntPtr HWND_TOPMOST = (IntPtr)(-1);
-                SetWindowPos(_form.Handle, HWND_TOPMOST, finalX, finalY, w, h, SWP_NOACTIVATE);
-            }
+            // 从客户区原点换算，避免任务栏边框或缩放变化引入偏移。
+            POINT point = new POINT { X = left, Y = top };
+            return GetParent(_form.Handle) == taskbarHandle && ScreenToClient(taskbarHandle, ref point) &&
+                SetWindowPos(_form.Handle, IntPtr.Zero, point.X, point.Y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
         }
 
         public void Restore()

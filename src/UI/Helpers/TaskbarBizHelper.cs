@@ -13,7 +13,6 @@ namespace LiteMonitor.src.UI.Helpers
     /// </summary>
     public class TaskbarBizHelper
     {
-        private readonly Form _form;
         private readonly Settings _cfg;
         private readonly TaskbarWinHelper _winHelper;
         
@@ -29,13 +28,11 @@ namespace LiteMonitor.src.UI.Helpers
 
         public int Height => _taskbarHeight;
         public Rectangle Rect => _taskbarRect;
-        public IntPtr HandleTaskbar => _hTaskbar;
         public Color TransparentKey => _transparentKey;
         public bool LastIsLightTheme => _lastIsLightTheme;
 
-        public TaskbarBizHelper(Form form, Settings cfg, TaskbarWinHelper winHelper)
+        public TaskbarBizHelper(Settings cfg, TaskbarWinHelper winHelper)
         {
-            _form = form;
             _cfg = cfg;
             _winHelper = winHelper;
             _isWin11 = Environment.OSVersion.Version >= new Version(10, 0, 22000);
@@ -85,27 +82,16 @@ namespace LiteMonitor.src.UI.Helpers
         public void FindHandles()
         {
             var handles = _winHelper.FindHandles(_cfg.TaskbarMonitorDevice);
+            if (handles.hTaskbar != _hTaskbar) _winHelper.RestoreTaskbar();
             _hTaskbar = handles.hTaskbar;
             _hTray = handles.hTray;
         }
 
-        public bool IsTaskbarValid()
+        public bool UpdateTaskbarRect()
         {
-            if (_hTaskbar == IntPtr.Zero) return false;
-            return TaskbarWinHelper.IsWindow(_hTaskbar);
-        }
-
-        public void AttachToTaskbar()
-        {
-            if (_hTaskbar == IntPtr.Zero) FindHandles();
-            if (_hTaskbar == IntPtr.Zero) return;
-            _winHelper.AttachToTaskbar(_hTaskbar);
-        }
-
-        public void UpdateTaskbarRect()
-        {
-            _taskbarRect = _winHelper.GetTaskbarRect(_hTaskbar, _cfg.TaskbarMonitorDevice);
-            _taskbarHeight = Math.Max(24, _taskbarRect.Height);
+            _taskbarRect = _winHelper.GetTaskbarRect(_hTaskbar);
+            _taskbarHeight = _taskbarRect.Height;
+            return !_taskbarRect.IsEmpty;
         }
 
         public bool IsVertical()
@@ -144,7 +130,7 @@ namespace LiteMonitor.src.UI.Helpers
                 {
                     availHeight = tray.Top - _taskbarRect.Top;
                 }
-                return panelHeight + margin <= availHeight;
+                return panelHeight + margin + Math.Max(0, _cfg.TaskbarManualOffset) <= availHeight;
             }
             else
             {
@@ -155,13 +141,13 @@ namespace LiteMonitor.src.UI.Helpers
                 {
                     availWidth = tray.Left - _taskbarRect.Left;
                 }
-                return panelWidth + margin <= availWidth;
+                return panelWidth + margin + Math.Max(0, _cfg.TaskbarManualOffset) <= availWidth;
             }
         }
 
-        public void UpdatePlacement(int panelWidth)
+        public bool UpdatePlacement(int panelWidth, int panelHeight)
         {
-            if (_hTaskbar == IntPtr.Zero) return;
+            if (_hTaskbar == IntPtr.Zero) return false;
 
             int leftScreen = _taskbarRect.Left;
             int topScreen;
@@ -173,8 +159,8 @@ namespace LiteMonitor.src.UI.Helpers
                 if (_winHelper.UsesInternalLayout)
                 {
                     // 注意：垂直模式下，Width 是固定的（任务栏宽度），Height 是 Monitor 高度
-                    _winHelper.SetPosition(_hTaskbar, 0, 0, _taskbarRect.Width, _form.Height, _cfg.TaskbarManualOffset, _cfg.TaskbarAlignLeft);
-                    return;
+                    return _winHelper.SetPosition(_hTaskbar, leftScreen, _taskbarRect.Top, _taskbarRect.Width,
+                        Math.Min(panelHeight, _taskbarRect.Height), _cfg.TaskbarManualOffset, _cfg.TaskbarAlignLeft);
                 }
 
                 // 尝试定位到托盘上方
@@ -188,11 +174,10 @@ namespace LiteMonitor.src.UI.Helpers
                     }
                 }
 
-                topScreen = bottomLimit - _form.Height - _cfg.TaskbarManualOffset - 6;
-                if (topScreen < _taskbarRect.Top) topScreen = _taskbarRect.Top;
+                topScreen = Math.Clamp(bottomLimit - panelHeight - _cfg.TaskbarManualOffset - 6,
+                    _taskbarRect.Top, Math.Max(_taskbarRect.Top, _taskbarRect.Bottom - panelHeight));
 
-                _winHelper.SetPosition(_hTaskbar, leftScreen, topScreen, _taskbarRect.Width, _form.Height);
-                return;
+                return _winHelper.SetPosition(_hTaskbar, leftScreen, topScreen, _taskbarRect.Width, Math.Min(panelHeight, _taskbarRect.Height));
             }
 
             // ★★★ 水平任务栏定位 ★★★
@@ -209,7 +194,7 @@ namespace LiteMonitor.src.UI.Helpers
             int sysRightAvoid = sysCentered ? 0 : rawWidgetWidth;
             int rightModeTotalOffset = sysRightAvoid + manualOffset;
 
-            int timeWidth = _isWin11 ? 90 : 0; 
+            int timeWidth = _isWin11 ? (int)Math.Round(90.0 * GetTaskbarDpi() / 96.0) : 0;
             bool alignLeft = _cfg.TaskbarAlignLeft && sysCentered; 
 
             topScreen = _taskbarRect.Top;
@@ -226,11 +211,12 @@ namespace LiteMonitor.src.UI.Helpers
                 // 我们不需要计算 Right 偏移，位置由 Strategy 内部决定
                 if (_winHelper.UsesInternalLayout)
                 {
-                    _winHelper.SetPosition(_hTaskbar, 0, 0, panelWidth, _taskbarHeight, _cfg.TaskbarManualOffset, _cfg.TaskbarAlignLeft);
-                    return;
+                    return _winHelper.SetPosition(_hTaskbar, leftScreen, topScreen, Math.Min(panelWidth, _taskbarRect.Width),
+                        _taskbarHeight, _cfg.TaskbarManualOffset, _cfg.TaskbarAlignLeft);
                 }
 
-                if (isPrimary && _hTray != IntPtr.Zero && _winHelper.GetWindowRectWrapper(_hTray, out Rectangle tray))
+                if (isPrimary && _hTray != IntPtr.Zero && _winHelper.GetWindowRectWrapper(_hTray, out Rectangle tray) &&
+                    tray.Left > _taskbarRect.Left && tray.Left <= _taskbarRect.Right)
                 {
                     leftScreen = tray.Left - panelWidth - 6;
                     leftScreen -= rightModeTotalOffset;
@@ -243,21 +229,21 @@ namespace LiteMonitor.src.UI.Helpers
                 }
             }
 
-            _winHelper.SetPosition(_hTaskbar, leftScreen, topScreen, panelWidth, _taskbarHeight);
+            leftScreen = Math.Clamp(leftScreen, _taskbarRect.Left, Math.Max(_taskbarRect.Left, _taskbarRect.Right - panelWidth));
+            return _winHelper.SetPosition(_hTaskbar, leftScreen, topScreen, Math.Min(panelWidth, _taskbarRect.Width), _taskbarHeight);
         }
 
-        public void BuildVerticalLayout(List<Column> cols)
+        public int BuildVerticalLayout(List<Column> cols)
         {
             var s = _cfg.GetStyle(); 
             
             int w = _taskbarRect.Width;
-            if (w < 20) w = 60; 
 
             float dpiScale = GetTaskbarDpi() / 96f;
             int itemHeight = (int)((s.Size * 1.5f + 6) * dpiScale);
             if (itemHeight < (int)(20 * dpiScale)) itemHeight = (int)(20 * dpiScale);
 
-            int margin = Math.Max(0, s.Inner / 2);
+            int margin = Math.Clamp(s.Inner / 2, 0, (w - 1) / 2);
             int contentWidth = w - (margin * 2);
 
             int y = 0;
@@ -286,8 +272,7 @@ namespace LiteMonitor.src.UI.Helpers
 
                 y += s.VOff;
             }
-            _form.Width = w;
-            _form.Height = y;
+            return y;
         }
 
         // =================================================================

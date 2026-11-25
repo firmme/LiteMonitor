@@ -120,15 +120,15 @@ namespace LiteMonitor
 
                 if (_mode == LayoutMode.Taskbar)
                 {
-                    int fixOffset = 1; 
-                    
                     if (isTaskbarSingle) {
-                        col.BoundsTop = new Rectangle(x, col.Bounds.Y + fixOffset, col.ColumnWidth, colHeight);
+                        col.BoundsTop = col.Bounds;
                         col.BoundsBottom = Rectangle.Empty;
                     } else {
-                        // 双行模式
-                        col.BoundsTop = new Rectangle(x, col.Bounds.Y + s.VOff + fixOffset, col.ColumnWidth, _rowH - s.VOff);
-                        col.BoundsBottom = new Rectangle(x, col.Bounds.Y + _rowH - s.VOff + fixOffset, col.ColumnWidth, _rowH);
+                        // 保留垂直微调，同时把两行限制在任务栏客户区内。
+                        var top = new Rectangle(x, s.VOff + 1, col.ColumnWidth, _rowH - s.VOff);
+                        var bottom = new Rectangle(x, _rowH - s.VOff + 1, col.ColumnWidth, _rowH);
+                        col.BoundsTop = Rectangle.Intersect(top, col.Bounds);
+                        col.BoundsBottom = Rectangle.Intersect(bottom, col.Bounds);
                     }
                 }
                 else
@@ -164,12 +164,13 @@ namespace LiteMonitor
             if (item == null) return 0;
 
             float dpi = _dpiScale;
+            var textFlags = _mode == LayoutMode.Taskbar ? TaskbarRenderer.TextFlags : TextFormatFlags.NoPadding;
 
             // [通用逻辑] 如果隐藏标签 (ShortLabel 为空 或 " ")，则只计算文本宽
             if (string.IsNullOrEmpty(item.ShortLabel) || item.ShortLabel == " ")
             {
                 // 对于 Dashboard/IP 类，直接使用当前文本作为测量依据
-                string valText = item.TextValue ?? item.GetFormattedText(true);
+                string valText = _mode == LayoutMode.Taskbar ? item.GetFormattedText(true) : item.TextValue ?? item.GetFormattedText(true);
                 if (string.IsNullOrEmpty(valText)) return 0;
 
                 Font valFont;
@@ -190,8 +191,7 @@ namespace LiteMonitor
                 try
                 {
                     int w = TextRenderer.MeasureText(g, valText, valFont,
-                        new Size(int.MaxValue, int.MaxValue),
-                        TextFormatFlags.NoPadding).Width;
+                        new Size(int.MaxValue, int.MaxValue), textFlags).Width;
                     
                     // 纯文本项建议稍微加一点点左右 padding，防止紧贴
                     return w + 4;
@@ -226,13 +226,13 @@ namespace LiteMonitor
                 try
                 {
                     int wLabel = TextRenderer.MeasureText(g, label, labelFont,
-                        new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width;
+                        new Size(int.MaxValue, int.MaxValue), textFlags).Width;
 
                     // 2. Value (使用样本值估算 或 真实值)
-                    string sample = GenerateSampleText(item);
+                    string sample = _mode == LayoutMode.Taskbar ? item.GetFormattedText(true) : GenerateSampleText(item);
 
                     int wValue = TextRenderer.MeasureText(g, sample, valueFont,
-                        new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width;
+                        new Size(int.MaxValue, int.MaxValue), textFlags).Width;
 
                     // 3. Padding
                     int paddingX;
@@ -321,6 +321,11 @@ namespace LiteMonitor
                     void AddItemToHash(MetricItem? item)
                     {
                         if (item == null) return;
+                        if (_mode == LayoutMode.Taskbar)
+                        {
+                            hash = hash * 31 + StringComparer.Ordinal.GetHashCode(item.GetFormattedText(true));
+                            return;
+                        }
                         string text = item.TextValue ?? item.GetFormattedText(true);
                         hash = hash * 31 + text.Length;
                         // 关键：数字位宽一致，所以只对非数字字符（单位、小数点）做哈希

@@ -29,7 +29,7 @@ namespace LiteMonitor.src.UI.Helpers
         /// <summary>
         /// 设置位置和大小
         /// </summary>
-        void SetPosition(IntPtr taskbarHandle, int left, int top, int w, int h, int manualOffset, bool alignLeft);
+        bool SetPosition(IntPtr taskbarHandle, int left, int top, int w, int h, int manualOffset, bool alignLeft);
 
         /// <summary>
         /// 恢复任务栏原始布局（如果做过修改）
@@ -52,7 +52,6 @@ namespace LiteMonitor.src.UI.Helpers
         public const int GWL_STYLE = -16;
         public const int GWL_EXSTYLE = -20;
         public const int WS_CHILD = 0x40000000;
-        public const int WS_VISIBLE = 0x10000000;
         public const int WS_CLIPSIBLINGS = 0x04000000;
         public const int WS_EX_LAYERED = 0x80000;
         public const int WS_EX_TOOLWINDOW = 0x00000080;
@@ -67,6 +66,14 @@ namespace LiteMonitor.src.UI.Helpers
 
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT { public int left, top, right, bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MONITORINFO
+        {
+            public int size;
+            public RECT bounds, workArea;
+            public int flags;
+        }
 
         [DllImport("user32.dll")] public static extern IntPtr FindWindow(string cls, string? name);
         [DllImport("user32.dll")] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string? name);
@@ -83,6 +90,8 @@ namespace LiteMonitor.src.UI.Helpers
         [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
         [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
         [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint flags);
+        [DllImport("user32.dll", EntryPoint = "GetMonitorInfoW")] public static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
     }
 
     /// <summary>
@@ -93,11 +102,6 @@ namespace LiteMonitor.src.UI.Helpers
     {
         private readonly Form _form;
         private readonly ITaskbarStrategy _strategy;
-
-        // ★★★ 性能优化缓存 ★★★
-        private Rectangle _lastWindowRect = Rectangle.Empty;
-        private Rectangle _cachedResult = Rectangle.Empty;
-        private bool _isCacheValid = false;
 
         // [Optimization] 静态缓存系统版本检测结果
         private static readonly bool _isWin11 = Environment.OSVersion.Version.Major == 10 && Environment.OSVersion.Version.Build >= 22000;
@@ -125,16 +129,14 @@ namespace LiteMonitor.src.UI.Helpers
         {
             _form.BackColor = transparentKey;
             
-            if (_form.IsHandleCreated)
-            {
-                uint colorKey = (uint)(transparentKey.R | (transparentKey.G << 8) | (transparentKey.B << 16));
-                SetLayeredWindowAttributes(_form.Handle, colorKey, 0, LWA_COLORKEY);
-            }
+            IntPtr handle = _form.Handle;
+            uint colorKey = (uint)(transparentKey.R | (transparentKey.G << 8) | (transparentKey.B << 16));
+            SetLayeredWindowAttributes(handle, colorKey, 0, LWA_COLORKEY);
 
-            int exStyle = GetWindowLong(_form.Handle, GWL_EXSTYLE);
+            int exStyle = GetWindowLong(handle, GWL_EXSTYLE);
             if (clickThrough) exStyle |= WS_EX_TRANSPARENT; 
             else exStyle &= ~WS_EX_TRANSPARENT; 
-            SetWindowLong(_form.Handle, GWL_EXSTYLE, exStyle);
+            SetWindowLong(handle, GWL_EXSTYLE, exStyle);
             
             _form.Invalidate();
         }
@@ -162,7 +164,7 @@ namespace LiteMonitor.src.UI.Helpers
             _strategy.Attach(taskbarHandle);
         }
 
-        public void SetPosition(IntPtr taskbarHandle, int left, int top, int w, int h, int manualOffset = 0, bool alignLeft = true)
+        public bool SetPosition(IntPtr taskbarHandle, int left, int top, int w, int h, int manualOffset = 0, bool alignLeft = true)
         {
             // 检查父窗口是否正确，防止脱离
             IntPtr currentParent = GetParent(_form.Handle);
@@ -173,7 +175,7 @@ namespace LiteMonitor.src.UI.Helpers
                 AttachToTaskbar(taskbarHandle);
             }
 
-            _strategy.SetPosition(taskbarHandle, left, top, w, h, manualOffset, alignLeft);
+            return _strategy.SetPosition(taskbarHandle, left, top, w, h, manualOffset, alignLeft);
         }
 
         public void RestoreTaskbar()
@@ -186,23 +188,21 @@ namespace LiteMonitor.src.UI.Helpers
         // =================================================================
         public (IntPtr hTaskbar, IntPtr hTray) FindHandles(string targetDevice)
         {
-            Screen target = Screen.PrimaryScreen;
+            Screen? target = Screen.PrimaryScreen;
             if (!string.IsNullOrEmpty(targetDevice))
             {
                 target = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == targetDevice) ?? Screen.PrimaryScreen;
             }
 
-            if (target.Primary)
+            if (target is { Primary: false })
             {
-                IntPtr hTaskbar = FindWindow("Shell_TrayWnd", null);
-                IntPtr hTray = FindWindowEx(hTaskbar, IntPtr.Zero, "TrayNotifyWnd", null);
-                return (hTaskbar, hTray);
+                IntPtr secondaryTaskbar = FindSecondaryTaskbar(target);
+                if (secondaryTaskbar != IntPtr.Zero) return (secondaryTaskbar, IntPtr.Zero);
             }
-            else
-            {
-                IntPtr hTaskbar = FindSecondaryTaskbar(target);
-                return (hTaskbar, IntPtr.Zero);
-            }
+
+            IntPtr hTaskbar = FindWindow("Shell_TrayWnd", null);
+            IntPtr hTray = hTaskbar == IntPtr.Zero ? IntPtr.Zero : FindWindowEx(hTaskbar, IntPtr.Zero, "TrayNotifyWnd", null);
+            return (hTaskbar, hTray);
         }
 
         private IntPtr FindSecondaryTaskbar(Screen screen)
@@ -210,83 +210,43 @@ namespace LiteMonitor.src.UI.Helpers
             IntPtr hWnd = IntPtr.Zero;
             while ((hWnd = FindWindowEx(IntPtr.Zero, hWnd, "Shell_SecondaryTrayWnd", null)) != IntPtr.Zero)
             {
-                GetWindowRect(hWnd, out RECT rect);
-                Rectangle r = Rectangle.FromLTRB(rect.left, rect.top, rect.right, rect.bottom);
-                if (screen.Bounds.Contains(r.Location) || screen.Bounds.IntersectsWith(r))
+                if (GetWindowRectWrapper(hWnd, out Rectangle rect) && screen.Bounds.IntersectsWith(rect))
                     return hWnd;
             }
-            return FindWindow("Shell_TrayWnd", null);
+            return IntPtr.Zero;
         }
 
-        public Rectangle GetTaskbarRect(IntPtr hTaskbar, string targetDevice)
+        public Rectangle GetTaskbarRect(IntPtr hTaskbar)
         {
-            if (hTaskbar == IntPtr.Zero) return Rectangle.Empty;
+            if (hTaskbar == IntPtr.Zero || !GetWindowRectWrapper(hTaskbar, out Rectangle window) ||
+                window.Width <= 0 || window.Height <= 0)
+                return Rectangle.Empty;
 
-            // 1. 获取物理矩形
-            if (!GetWindowRect(hTaskbar, out RECT r)) return Rectangle.Empty;
-            var rectPhys = Rectangle.FromLTRB(r.left, r.top, r.right, r.bottom);
+            const uint monitorDefaultToNull = 0;
+            IntPtr monitor = MonitorFromWindow(hTaskbar, monitorDefaultToNull);
+            var info = new MONITORINFO { size = Marshal.SizeOf<MONITORINFO>() };
+            if (monitor == IntPtr.Zero || !GetMonitorInfo(monitor, ref info)) return Rectangle.Empty;
 
-            // 缓存检查
-            if (_isCacheValid && rectPhys == _lastWindowRect) return _cachedResult;
+            // 工作区只用于收窄底部任务栏区域，避免会话切换时过渡尺寸把子窗口放到任务栏外。
+            var bounds = Rectangle.FromLTRB(info.bounds.left, info.bounds.top, info.bounds.right, info.bounds.bottom);
+            Rectangle visible = Rectangle.Intersect(window, bounds);
+            // 自动隐藏的任务栏可能只剩屏幕边缘的一条细线。
+            var center = new Point(window.Left + window.Width / 2, window.Top + window.Height / 2);
+            if (!visible.Contains(center)) return Rectangle.Empty;
+            if (window.Height > window.Width || window.Top <= bounds.Top) return visible;
 
-            Rectangle finalRect = rectPhys;
+            int workBottom = info.workArea.bottom;
+            if (window.Bottom >= bounds.Bottom - 2 && workBottom > visible.Top && workBottom < visible.Bottom)
+                return Rectangle.FromLTRB(visible.Left, workBottom, visible.Right, visible.Bottom);
 
-            // =========================================================================
-            // [SIMPLIFIED FIX] 极简稳定方案：基于 WorkingArea 和 强制高度修正 (DPI适配版)
-            // =========================================================================
-            try
+            if (_isWin11)
             {
-                Screen screen = null;
-                if (!string.IsNullOrEmpty(targetDevice)) 
-                    screen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == targetDevice);
-                if (screen == null) 
-                    screen = Screen.FromHandle(hTaskbar);
-
-                if (screen != null)
-                {
-                    Rectangle workArea = screen.WorkingArea;
-                    Rectangle screenBounds = screen.Bounds;
-                    int reservedBottom = screenBounds.Bottom - workArea.Bottom;
-
-                    // 场景 A: 锚定模式
-                    if (reservedBottom > 2) 
-                    {
-                        finalRect = new Rectangle(rectPhys.Left, workArea.Bottom, rectPhys.Width, reservedBottom);
-                    }
-                    // 场景 B: 悬浮模式
-                    else
-                    {
-                        if (_isWin11)
-                        {
-                            // [Fix] 增加对垂直任务栏的判断，防止误判
-                            // StartAllBack 等软件可能启用垂直任务栏，此时不应应用底部水平任务栏的高度修正
-                            bool isVertical = rectPhys.Height > rectPhys.Width;
-
-                            if (!isVertical)
-                            {
-                                int dpi = GetTaskbarDpi();
-                                int standardHeight = (int)Math.Round(48.0 * dpi / 96.0);
-
-                                if (rectPhys.Height > (standardHeight * 0.8))
-                                {
-                                    finalRect = new Rectangle(
-                                        rectPhys.Left, 
-                                        rectPhys.Bottom - standardHeight, 
-                                        rectPhys.Width, 
-                                        standardHeight);
-                                }
-                            }
-                        }
-                    }
-                }
+                int standardHeight = (int)Math.Round(48.0 * GetDpiForWindowHandle(hTaskbar) / 96.0);
+                if (visible.Height > standardHeight)
+                    return new Rectangle(visible.Left, visible.Bottom - standardHeight, visible.Width, standardHeight);
             }
-            catch { }
 
-            _lastWindowRect = rectPhys;
-            _cachedResult = finalRect;
-            _isCacheValid = true;
-
-            return _cachedResult;
+            return visible;
         }
 
         public bool GetWindowRectWrapper(IntPtr hWnd, out Rectangle rect)
@@ -317,7 +277,12 @@ namespace LiteMonitor.src.UI.Helpers
             IntPtr taskbar = FindWindow("Shell_TrayWnd", null);
             if (taskbar != IntPtr.Zero)
             {
-                try { return (int)GetDpiForWindow(taskbar); } catch { }
+                try
+                {
+                    uint dpi = GetDpiForWindow(taskbar);
+                    if (dpi > 0) return (int)dpi;
+                }
+                catch { }
             }
             return 96;
         }
@@ -362,13 +327,11 @@ namespace LiteMonitor.src.UI.Helpers
 
         public static void ActivateWindow(IntPtr handle) => SetForegroundWindow(handle);
 
-        public static bool IsWindow(IntPtr hWnd) => NativeMethods.IsWindow(hWnd);
-
         public static void ApplyChildWindowStyle(IntPtr hWnd)
         {
             int style = GetWindowLong(hWnd, GWL_STYLE);
             style &= (int)~0x80000000; 
-            style |= WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS;
+            style |= WS_CHILD | WS_CLIPSIBLINGS;
             SetWindowLong(hWnd, GWL_STYLE, style);
         }
     }

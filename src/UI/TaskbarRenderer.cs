@@ -9,6 +9,7 @@ namespace LiteMonitor
     /// </summary>
     public static class TaskbarRenderer
     {
+        internal const TextFormatFlags TextFlags = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
         //private static readonly Settings _settings = Settings.Load();
         
         // 字体缓存 - 由本类完全拥有 (不进入 UIUtils 共享缓存，避免被 ClearBrushCache 释放)
@@ -104,6 +105,7 @@ namespace LiteMonitor
 
         private static void DrawItem(Graphics g, MetricItem item, Rectangle rc, bool light)
         {
+            if (rc.Width <= 0 || rc.Height <= 0) return;
             // ★★★ 优化：直接使用缓存的 ShortLabel，避免每帧生成 Key 和查询字典 ★★★
             string label = item.ShortLabel;
 
@@ -144,10 +146,7 @@ namespace LiteMonitor
             {
                 TextRenderer.DrawText(
                     g, value, font, rc, valueColor,
-                    TextFormatFlags.Left |
-                    TextFormatFlags.VerticalCenter |
-                    TextFormatFlags.NoPadding |
-                    TextFormatFlags.NoClipping
+                    TextFlags | TextFormatFlags.Left | TextFormatFlags.VerticalCenter
                 );
                 return;
             }
@@ -155,19 +154,13 @@ namespace LiteMonitor
             // Label 左对齐
             TextRenderer.DrawText(
                 g, label, font, rc, labelColor,
-                TextFormatFlags.Left |
-                TextFormatFlags.VerticalCenter |
-                TextFormatFlags.NoPadding |
-                TextFormatFlags.NoClipping
+                TextFlags | TextFormatFlags.Left | TextFormatFlags.VerticalCenter
             );
 
             // Value 右对齐
             TextRenderer.DrawText(
                 g, value, font, rc, valueColor,
-                TextFormatFlags.Right |
-                TextFormatFlags.VerticalCenter |
-                TextFormatFlags.NoPadding |
-                TextFormatFlags.NoClipping
+                TextFlags | TextFormatFlags.Right | TextFormatFlags.VerticalCenter
             );
         }
         // [新增] 辅助：根据状态快速获取颜色 (替代原来的 PickColor)

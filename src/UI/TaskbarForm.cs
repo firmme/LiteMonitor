@@ -19,16 +19,17 @@ namespace LiteMonitor
         private readonly TaskbarWinHelper _winHelper;
         private readonly TaskbarBizHelper _bizHelper;
         
-        private HorizontalLayout _layout;
+        private HorizontalLayout _layout = null!;
         private List<Column>? _cols;
         private ContextMenuStrip? _currentMenu;
-        private DateTime _lastFindHandleTime = DateTime.MinValue;
+        private long _nextHandleLookup;
         private string _lastLayoutSignature = "";
         private readonly TaskbarTooltipHelper _tooltipHelper;
 
         // ★★★ DPI 跟踪：任务栏所在显示器 DPI 变化时刷新字体与布局 ★★★
         private int _taskbarDpi;
-        private bool _hiddenByOverflow;
+        private bool _styleDirty = true;
+        internal bool IsNativeWindowValid => !IsDisposed && IsHandleCreated && IsWindow(Handle);
         
         // 公开属性
         public string TargetDevice { get; private set; } = "";
@@ -39,7 +40,6 @@ namespace LiteMonitor
         private const int WM_RBUTTONDOWN = 0x0204;
         private const int WM_RBUTTONUP = 0x0205;
         private const int WM_LBUTTONDBLCLK = 0x0203;
-        private bool _isWin11;
 
         public TaskbarForm(Settings cfg, UIController ui, MainForm mainForm)
         {
@@ -48,61 +48,36 @@ namespace LiteMonitor
             _mainForm = mainForm;
             TargetDevice = _cfg.TaskbarMonitorDevice;
 
-            _isWin11 = Environment.OSVersion.Version >= new Version(10, 0, 22000);
-
             // 初始化组件
             _winHelper = new TaskbarWinHelper(this);
-            _bizHelper = new TaskbarBizHelper(this, _cfg, _winHelper);
+            _bizHelper = new TaskbarBizHelper(_cfg, _winHelper);
 
             // 窗体属性
             FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
             ShowInTaskbar = false;
             ControlBox = false;
             TopMost = false;
             DoubleBuffered = true;
 
+            _tooltipHelper = new TaskbarTooltipHelper(this, _cfg, _ui);
             ReloadLayout();
-
-            _bizHelper.CheckTheme(true);
-            _bizHelper.FindHandles();
-            
-            _bizHelper.AttachToTaskbar();
-            _winHelper.ApplyLayeredStyle(_bizHelper.TransparentKey, _cfg.TaskbarClickThrough);
 
             _timer.Interval = Math.Max(_cfg.RefreshMs, 60);
             _timer.Tick += (_, __) => Tick();
             _timer.Start();
-
-            // 鼠标悬浮提示初始化
-            _tooltipHelper = new TaskbarTooltipHelper(this, _cfg, _ui);
-
-            Tick();
         }
 
         public void ReloadLayout()
         {
-            // 重新读取任务栏 DPI，保证字体/间距跟随显示器 DPI
-            _taskbarDpi = _bizHelper.GetTaskbarDpi();
-            TaskbarRenderer.ReloadStyle(_cfg, _taskbarDpi);
-
-            _layout = new HorizontalLayout(ThemeManager.Current, 300, LayoutMode.Taskbar, _cfg, _taskbarDpi);
-            _lastLayoutSignature = ""; // 重置签名，强制重算
-            _winHelper.ApplyLayeredStyle(_bizHelper.TransparentKey, _cfg.TaskbarClickThrough);
+            _nextHandleLookup = 0;
+            _styleDirty = true;
             _bizHelper.CheckTheme(true);
-
-            // 更新悬浮窗模式 (支持热切换)
-            _tooltipHelper?.ReloadMode();
-
-            // 注意：这里仍然可能因为 _cols 为空而暂时不 Build，
-            // 但随后的 Tick 会在获取到新数据后自动 Build
-            if (_cols != null && _cols.Count > 0)
-            {
-                _layout.Build(_cols, _bizHelper.Height);
-                Width = _layout.PanelWidth;
-                _bizHelper.UpdatePlacement(Width);
-            }
-            Invalidate();
+            _tooltipHelper.ReloadMode();
+            Tick();
         }
+
+        protected override bool ShowWithoutActivation => true;
 
         protected override void Dispose(bool disposing)
         {
@@ -179,23 +154,25 @@ namespace LiteMonitor
 
         private void Tick()
         {
-            // [Fix] 周期性检查句柄，防止 Explorer 重启后句柄失效
-            // 优化：仅在重试期或句柄无效时调用 FindHandles，且限制调用频率
-            bool isHandleInvalid = !_bizHelper.IsTaskbarValid();
-            
-            // 如果处于重试期，或者句柄无效且距离上次查找超过2秒(防止无Explorer时高频空转)
-            if (isHandleInvalid && (DateTime.Now - _lastFindHandleTime).TotalSeconds > 2)
+            // 显示器或托盘可以在原来的任务栏句柄仍有效时发生变化。
+            long now = Environment.TickCount64;
+            if (now >= _nextHandleLookup)
             {
                 _bizHelper.FindHandles();
-                _lastFindHandleTime = DateTime.Now;
+                _nextHandleLookup = now + 2000;
             }
 
-            // ★★★ DPI 变更检测：显示器缩放变化后刷新字体缓存与布局，修复字体不跟随 DPI 的问题 ★★★
+            if (!_bizHelper.UpdateTaskbarRect())
+            {
+                HideTaskbarPanel();
+                return;
+            }
+
             int currentDpi = _bizHelper.GetTaskbarDpi();
-            if (currentDpi > 0 && currentDpi != _taskbarDpi)
+            if (currentDpi != _taskbarDpi || _styleDirty)
             {
                 _taskbarDpi = currentDpi;
-                UIUtils.ClearFontCache();
+                _styleDirty = false;
                 TaskbarRenderer.ReloadStyle(_cfg, currentDpi);
                 _layout = new HorizontalLayout(ThemeManager.Current, Width, LayoutMode.Taskbar, _cfg, currentDpi);
                 _lastLayoutSignature = "";
@@ -211,13 +188,13 @@ namespace LiteMonitor
             
             _cols = nextCols; // 确认有效后再更新引用
 
-            _bizHelper.UpdateTaskbarRect(); 
-            
             // [Fix Part 2] 布局变更检测
-            if (_bizHelper.IsVertical())
+            bool isVertical = _bizHelper.IsVertical();
+            int panelHeight = _bizHelper.Height;
+            if (isVertical)
             {
                 // 垂直模式逻辑简单且无测量开销，直接重算即可
-                _bizHelper.BuildVerticalLayout(_cols);
+                panelHeight = _bizHelper.BuildVerticalLayout(_cols);
                 _lastLayoutSignature = "vertical";
             }
             else
@@ -234,41 +211,34 @@ namespace LiteMonitor
                 if (isUninitialized || isContentChanged)
                 {
                     _layout.Build(_cols, _bizHelper.Height);
-                    Width = _layout.PanelWidth;
-                    Height = _bizHelper.Height;
-                    
                     _lastLayoutSignature = currentSig;
                 }
             }
             
-            // ★★★ 空间不足时自动隐藏任务栏组件 (低分辨率 / 任务栏可用区域不足) ★★★
-            if (_cfg.TaskbarHideOnOverflow)
+            int panelWidth = isVertical ? _bizHelper.Rect.Width : _layout.PanelWidth;
+            if (_cfg.TaskbarHideOnOverflow && !_bizHelper.HasEnoughSpace(panelWidth, panelHeight))
             {
-                if (!_bizHelper.HasEnoughSpace(Width, Height))
-                {
-                    if (Visible) Hide();
-                    _hiddenByOverflow = true;
-                    return; // 空间不足时保持隐藏，等待空间恢复
-                }
-
-                if (_hiddenByOverflow)
-                {
-                    _hiddenByOverflow = false;
-                    if (!Visible) Show();
-                }
-            }
-            else if (_hiddenByOverflow)
-            {
-                // 关闭该设置后恢复显示
-                _hiddenByOverflow = false;
-                if (!Visible) Show();
+                HideTaskbarPanel();
+                return;
             }
 
-            _bizHelper.UpdatePlacement(Width);
+            if (!_bizHelper.UpdatePlacement(panelWidth, panelHeight))
+            {
+                HideTaskbarPanel();
+                return;
+            }
+            if (!Visible) Show();
             
             _tooltipHelper.UpdateContent();
 
             Invalidate();
+        }
+
+        private void HideTaskbarPanel()
+        {
+            if (!Visible) return;
+            Hide();
+            _winHelper.RestoreTaskbar();
         }
 
         protected override void OnPaintBackground(PaintEventArgs e)

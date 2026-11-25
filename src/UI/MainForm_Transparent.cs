@@ -1,3 +1,4 @@
+using Microsoft.Win32;
 using LiteMonitor.src.Core;
 using LiteMonitor.src.SystemServices;
 using LiteMonitor.src.UI;
@@ -21,7 +22,17 @@ namespace LiteMonitor
         private readonly MainFormBizHelper _bizHelper;
         private readonly int _wmTaskbarCreated;
         private const int WM_DISPLAYCHANGE = 0x007E;
-        private CancellationTokenSource _displayChangeCts;
+        private const int WM_WTSSESSION_CHANGE = 0x02B1;
+        private readonly System.Windows.Forms.Timer _displayRefreshTimer = new();
+        private IntPtr _sessionNotificationHandle;
+        private bool _displayRefreshPending;
+        private bool _taskbarRestartPending;
+
+        [System.Runtime.InteropServices.DllImport("wtsapi32.dll", ExactSpelling = true)]
+        private static extern bool WTSRegisterSessionNotification(IntPtr handle, int flags);
+
+        [System.Runtime.InteropServices.DllImport("wtsapi32.dll", ExactSpelling = true)]
+        private static extern bool WTSUnRegisterSessionNotification(IntPtr handle);
 
         private Point _dragOffset;
         private bool _uiDragging = false;
@@ -93,16 +104,11 @@ namespace LiteMonitor
                     if (_ui != null)
                     {
                         _taskbar = new TaskbarForm(_cfg, _ui, this);
-                        _taskbar.Show();
                     }
                 }
                 else
                 {
-                    if (!_taskbar.Visible)
-                    {
-                        _taskbar.Show();
-                        _taskbar.ReloadLayout();
-                    }
+                    _taskbar.ReloadLayout();
                 }
             }
             else
@@ -116,9 +122,15 @@ namespace LiteMonitor
             }
         }
 
+        internal void ReloadTaskbarLayout()
+        {
+            if (_taskbar is { IsDisposed: false }) _taskbar.ReloadLayout();
+        }
+
         // ========== 构造函数 ==========
         public MainForm()
         {
+            _displayRefreshTimer.Tick += (_, _) => RefreshDisplayLayout();
             // 语言加载
             if (string.IsNullOrEmpty(_cfg.Language))
             {
@@ -238,44 +250,82 @@ namespace LiteMonitor
 
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == _wmTaskbarCreated && _wmTaskbarCreated != 0)
+            if (m.Msg == _wmTaskbarCreated && _wmTaskbarCreated != 0 && _cfg.ShowTaskbar)
             {
-                // [Fix] Explorer 重启后，子窗口 TaskbarForm 会被销毁或失效。
-                // 必须由主窗口感知并重建 TaskbarForm，才能恢复显示。
-                if (_cfg.ShowTaskbar)
-                {
-                    // 延迟执行，确保 Explorer 初始化基本完成，同时避免阻塞消息泵
-                    this.BeginInvoke(new Action(async () =>
-                    {
-                        try 
-                        {
-                            await Task.Delay(3000); // 等待3秒让Explorer缓口气
-                            ToggleTaskbar(false);   // 彻底销毁旧实例
-                            ToggleTaskbar(true);    // 创建新实例(新实例自带重试机制)
-                        }
-                        catch { }
-                    }));
-                }
+                _taskbarRestartPending = true;
+                ScheduleDisplayRefresh(3000);
             }
-
-            if (m.Msg == WM_DISPLAYCHANGE)
+            else if (m.Msg == WM_DISPLAYCHANGE)
             {
-                // [Fix #288] 分辨率改变后，延迟执行位置恢复，确保 Screen.AllScreens 已完全更新
-                // 增加防抖机制，避免短时间内多次触发
-                _displayChangeCts?.Cancel();
-                _displayChangeCts = new System.Threading.CancellationTokenSource();
-                var token = _displayChangeCts.Token;
-
-                Task.Delay(500, token).ContinueWith(t => 
-                {
-                    if (!t.IsCanceled)
-                    {
-                        this.BeginInvoke(new Action(() => _bizHelper?.RestorePos()));
-                    }
-                });
+                ScheduleDisplayRefresh(500);
+            }
+            else if (m.Msg == WM_WTSSESSION_CHANGE && (SessionSwitchReason)m.WParam.ToInt32() is
+                SessionSwitchReason.SessionLogon or SessionSwitchReason.SessionUnlock or
+                SessionSwitchReason.ConsoleConnect or SessionSwitchReason.ConsoleDisconnect or
+                SessionSwitchReason.RemoteConnect or SessionSwitchReason.RemoteDisconnect)
+            {
+                ScheduleDisplayRefresh(1000);
             }
 
             base.WndProc(ref m);
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            RegisterSessionNotifications();
+            if (_displayRefreshPending) ScheduleDisplayRefresh(500);
+        }
+
+        protected override void OnHandleDestroyed(EventArgs e)
+        {
+            _displayRefreshTimer.Stop();
+            if (_sessionNotificationHandle != IntPtr.Zero)
+            {
+                WTSUnRegisterSessionNotification(_sessionNotificationHandle);
+                _sessionNotificationHandle = IntPtr.Zero;
+            }
+            base.OnHandleDestroyed(e);
+        }
+
+        private void RegisterSessionNotifications()
+        {
+            const int notifyForThisSession = 0;
+            if (_sessionNotificationHandle != IntPtr.Zero || !IsHandleCreated) return;
+            if (WTSRegisterSessionNotification(Handle, notifyForThisSession))
+                _sessionNotificationHandle = Handle;
+            else if (!_displayRefreshTimer.Enabled)
+            {
+                // 开机自启时，远程桌面服务可能尚未就绪。
+                _displayRefreshTimer.Interval = 2000;
+                _displayRefreshTimer.Start();
+            }
+        }
+
+        private void ScheduleDisplayRefresh(int delay)
+        {
+            _displayRefreshPending = true;
+            _displayRefreshTimer.Stop();
+            _displayRefreshTimer.Interval = _taskbarRestartPending ? 3000 : delay;
+            _displayRefreshTimer.Start();
+        }
+
+        private void RefreshDisplayLayout()
+        {
+            _displayRefreshTimer.Stop();
+            RegisterSessionNotifications();
+            if (!_displayRefreshPending) return;
+
+            _displayRefreshPending = false;
+            bool restartTaskbar = _taskbarRestartPending || _taskbar is { IsNativeWindowValid: false };
+            _taskbarRestartPending = false;
+            if (restartTaskbar) ToggleTaskbar(false);
+
+            _bizHelper?.RestorePos();
+            UIUtils.ScaleFactor = DeviceDpi / 96f;
+            _ui?.ApplyTheme(_cfg.Skin, retainData: true);
+            _bizHelper?.ClampToScreen();
+            if (_cfg.ShowTaskbar && (_taskbar == null || _taskbar.IsDisposed)) ToggleTaskbar(true);
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -289,8 +339,9 @@ namespace LiteMonitor
         protected override void OnDpiChanged(DpiChangedEventArgs e)
         {
             base.OnDpiChanged(e);
-            _ui?.ApplyTheme(_cfg.Skin);
-            _winHelper.ApplyRoundedCorners();
+            UIUtils.ScaleFactor = e.DeviceDpiNew / 96f;
+            _ui?.ApplyTheme(_cfg.Skin, retainData: true);
+            _winHelper?.ApplyRoundedCorners();
             this.Invalidate();
         }
 
@@ -346,6 +397,8 @@ namespace LiteMonitor
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            _displayRefreshTimer.Stop();
+            ToggleTaskbar(false);
             _cfg.Save(); 
             TrafficLogger.Save(); 
             HardwareHistoryLogger.Save();
@@ -355,6 +408,12 @@ namespace LiteMonitor
             
             _ui?.Dispose();
             _bizHelper.Dispose();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing) _displayRefreshTimer.Dispose();
         }
     }
 }
