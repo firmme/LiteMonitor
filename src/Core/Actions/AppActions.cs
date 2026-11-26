@@ -41,7 +41,7 @@ namespace LiteMonitor.src.Core.Actions
             ApplyTaskbarStyle(cfg, ui);       // 任务栏样式
 
             // ★★★ 5. [新增] 应用网页服务设置 (重启服务以应用端口变更) ★★★
-            ApplyWebServer(cfg);
+            ApplyWebServer();
 
             // 6. 应用插件设置 (重载实例并清除缓存)
             PluginManager.Instance.Reload(cfg);
@@ -214,40 +214,7 @@ namespace LiteMonitor.src.Core.Actions
         // =============================================================
         // 7. 网页服务 (新增逻辑)
         // =============================================================
-        public static void ApplyWebServer(Settings cfg)
-        {
-            var server = LiteWebServer.Instance;
-            if (server != null)
-            {
-                bool shouldRun = cfg.WebServerEnabled;
-                bool isRunning = server.IsRunning;
-                int targetPort = cfg.WebServerPort;
-                int currentPort = server.CurrentRunningPort;
-                string targetPwd = cfg.WebServerPassword;
-                string currentPwd = server.CurrentPassword;
-
-                if (shouldRun)
-                {
-                    // 端口变更 或 密码变更 均触发重启
-                    if (!isRunning || targetPort != currentPort || targetPwd != currentPwd)
-                    {
-                        server.Stop();
-                        if (!server.Start(out string err))
-                        {
-                            System.Diagnostics.Debug.WriteLine("WebServer restart failed: " + err);
-                        }
-                    }
-                }
-                else
-                {
-                    // 如果需要关闭，且当前正在运行 -> 关闭
-                    if (isRunning)
-                    {
-                        server.Stop();
-                    }
-                }
-            }
-        }
+        public static void ApplyWebServer() => LiteWebServer.Instance?.Start(out _);
 
         // --- 内部辅助 ---
         private static void ReloadTaskbarWindows()

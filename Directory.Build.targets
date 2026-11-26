@@ -1,0 +1,8 @@
+<Project>
+  <PropertyGroup>
+    <LiteMonitorUpdatePublicKeyFile Condition="'$(LiteMonitorUpdatePublicKeyFile)' == ''">$(MSBuildThisFileDirectory)resources\update-public-key.pem</LiteMonitorUpdatePublicKeyFile>
+  </PropertyGroup>
+  <ItemGroup Condition="('$(MSBuildProjectName)' == 'LiteMonitor' Or '$(MSBuildProjectName)' == 'LiteMonitor.Updater') And Exists('$(LiteMonitorUpdatePublicKeyFile)')">
+    <EmbeddedResource Include="$(LiteMonitorUpdatePublicKeyFile)" LogicalName="LiteMonitor.UpdatePublicKey" />
+  </ItemGroup>
+</Project>

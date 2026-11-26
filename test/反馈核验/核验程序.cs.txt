@@ -20,9 +20,9 @@ foreach (var sample in samples)
     using var client = new TcpClient();
     await client.ConnectAsync((IPEndPoint)listener.LocalEndpoint);
     using var accepted = await listener.AcceptTcpClientAsync();
-    var manager = new WebSessionManager(_ => { });
+    using var manager = new WebSessionManager(writer => { writer.WriteStartObject(); writer.WriteEndObject(); });
     var handler = manager.HandleClientAsync(accepted);
-    string request = "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+    string request = "GET /ws HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
         sample.KeyHeader + "dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
     await client.GetStream().WriteAsync(Encoding.ASCII.GetBytes(request));
     var buffer = new byte[1024];
@@ -45,16 +45,6 @@ foreach (var sample in samples)
 Console.WriteLine($"共 {samples.Length} 项，通过 {samples.Length - failed} 项，失败 {failed} 项。");
 return failed == 0 ? 0 : 1;
 
-namespace LiteMonitor
-{
-    // 隔离硬件和磁盘配置，核验只依赖无密码模式的服务端处理逻辑。
-    public class Settings
-    {
-        public string WebServerPassword { get; set; } = "";
-        public static Settings Load() => new();
-    }
-}
-namespace LiteMonitor.src.Core { }
 namespace LiteMonitor.src.WebServer
 {
     public static class WebPageContent

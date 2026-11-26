@@ -1,423 +1,389 @@
-using System.Collections.Concurrent;
-using System.Net.Sockets;
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
 using System.Buffers;
 using System.Diagnostics;
-using LiteMonitor.src.Core;
+using System.Net;
+using System.Net.Security;
+using System.Net.Sockets;
+using System.Net.WebSockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Text.Json;
 
-namespace LiteMonitor.src.WebServer
+namespace LiteMonitor.src.WebServer;
+
+public sealed class WebSessionManager : IDisposable
 {
-    public class WebSessionManager
+    private const int MaxConnections = 32;
+    private const int MaxHeaderBytes = 8192;
+    private const int MaxPasswordBytes = 1024;
+    private static readonly TimeSpan SessionLifetime = TimeSpan.FromMinutes(30);
+
+    private readonly Action<Utf8JsonWriter> _dataProvider;
+    private readonly X509Certificate2? _certificate;
+    private readonly string? _networkHost;
+    private readonly string _language;
+    private readonly byte[]? _passwordHash;
+    private bool _disposed;
+    private readonly CancellationTokenSource _stopping = new();
+    private readonly object _snapshotGate = new();
+    private readonly object _sessionGate = new();
+    private readonly Dictionary<string, DateTimeOffset> _sessions = new(StringComparer.Ordinal);
+    private DateTimeOffset _loginWindow;
+    private int _loginAttempts;
+    private byte[] _snapshot = [];
+    private long _snapshotTime = long.MinValue;
+    private Task? _run;
+
+    public WebSessionManager(Action<Utf8JsonWriter> dataProvider, X509Certificate2? certificate = null,
+        string? networkHost = null, string? password = null, string? language = null)
     {
-        private readonly ConcurrentDictionary<TcpClient, bool> _wsClients = new();
-        private readonly Action<Utf8JsonWriter> _dataProvider;
-        private volatile bool _isRunning = false;
+        _dataProvider = dataProvider;
+        _certificate = certificate;
+        _networkHost = networkHost;
+        _language = language switch { "zh" => "zh-CN", "zh-tw" => "zh-TW", _ => "en" };
+        _passwordHash = password == null ? null : SHA256.HashData(Encoding.UTF8.GetBytes(password));
+    }
 
-        public WebSessionManager(Action<Utf8JsonWriter> dataProvider)
+    public void Start(TcpListener listener) => _run = Task.Run(() => RunAsync(listener, _stopping.Token));
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _stopping.Cancel();
+        try { _run?.GetAwaiter().GetResult(); }
+        finally
         {
-            _dataProvider = dataProvider;
+            _stopping.Dispose();
+            _certificate?.Dispose();
         }
+    }
 
-        public void Start()
+    private async Task RunAsync(TcpListener listener, CancellationToken cancellationToken)
+    {
+        var active = new List<Task>(MaxConnections);
+        try
         {
-            if (_isRunning) return;
-            _isRunning = true;
-            Task.Run(BroadcastLoop);
-        }
-
-        public void Stop()
-        {
-            _isRunning = false;
-            foreach (var client in _wsClients.Keys)
+            while (!cancellationToken.IsCancellationRequested)
             {
-                try { client.Close(); } catch { }
+                var client = await listener.AcceptTcpClientAsync(cancellationToken);
+                active.RemoveAll(task => task.IsCompleted);
+                if (active.Count == MaxConnections) client.Dispose();
+                else active.Add(HandleClientAsync(client, cancellationToken));
             }
-            _wsClients.Clear();
         }
-
-        /// <summary>
-        /// 统一处理客户端连接（自动识别 WebSocket 或 HTTP）
-        /// </summary>
-        public async Task HandleClientAsync(TcpClient client)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (SocketException ex) { Debug.WriteLine($"[Web listener] {ex.Message}"); }
+        finally
         {
-            byte[] buffer = null;
+            listener.Stop();
+            await Task.WhenAll(active);
+        }
+    }
+
+    public async Task HandleClientAsync(TcpClient client, CancellationToken stopping = default)
+    {
+        using (client)
+        using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(stopping))
+        {
             try
             {
-                var stream = client.GetStream();
-                stream.WriteTimeout = 5000;
-
-                // 1. 读取请求头 (最多 8KB)
-                buffer = ArrayPool<byte>.Shared.Rent(8192);
-                int bytesRead = await ReadHeaderAsync(stream, buffer);
-                
-                if (bytesRead == 0) { client.Close(); return; }
-
-                string requestStr = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-
-                // 2. 协议分流
-                if (IsWebSocketUpgrade(requestStr))
-                {
-                    if (Handshake(stream, requestStr))
+                deadline.CancelAfter(TimeSpan.FromSeconds(5));
+                using var transport = client.GetStream();
+                using var tls = _certificate == null ? null : new SslStream(transport, leaveInnerStreamOpen: true);
+                if (tls != null)
+                    await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
                     {
-                        _wsClients.TryAdd(client, true);
-                        await ReceiveLoop(client); // 进入 WS 循环
-                    }
-                }
-                else
+                        ServerCertificate = _certificate
+                    }, deadline.Token);
+                Stream stream = (Stream?)tls ?? transport;
+
+                var request = await ReadRequestAsync(stream, deadline.Token);
+                if (request == null) return;
+                int port = ((IPEndPoint)client.Client.LocalEndPoint!).Port;
+                var origin = RequestOrigin(request, port);
+                if (origin == null)
                 {
-                    HandleHttpRequest(stream, requestStr);
-                    client.Close(); // HTTP 是短连接
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"Client Error: {ex.Message}");
-                try { client.Close(); } catch { }
-            }
-            finally
-            {
-                if (buffer != null) ArrayPool<byte>.Shared.Return(buffer);
-                // 接收循环结束或握手失败时，都释放此连接。
-                try { client.Close(); } catch { }
-            }
-        }
-
-        // --- 内部网络辅助方法 ---
-
-        private async Task<int> ReadHeaderAsync(NetworkStream stream, byte[] buffer)
-        {
-            // ReadTimeout 对异步读取无效，必须为整段请求头设置取消截止时间。
-            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            int maxHeaderBytes = Math.Min(8192, buffer.Length);
-            int totalBytes = 0;
-            while (totalBytes < maxHeaderBytes)
-            {
-                int read = await stream.ReadAsync(buffer.AsMemory(totalBytes, maxHeaderBytes - totalBytes), deadline.Token);
-                if (read == 0) return 0;
-                
-                totalBytes += read;
-                if (FindHeaderEnd(buffer, totalBytes) >= 0) return totalBytes;
-            }
-            // 超出上限或未收到完整结束符时，不处理任何 HTTP 或 WebSocket 请求。
-            return 0;
-        }
-
-        private int FindHeaderEnd(byte[] buffer, int length)
-        {
-            for (int i = 0; i < length - 3; i++)
-            {
-                if (buffer[i] == 13 && buffer[i+1] == 10 && buffer[i+2] == 13 && buffer[i+3] == 10)
-                    return i + 4; // 返回包含结束符的长度
-            }
-            return -1;
-        }
-
-        private bool IsWebSocketUpgrade(string req)
-        {
-            return req.StartsWith("GET ", StringComparison.OrdinalIgnoreCase) &&
-                   TryGetHeaderValue(req, "Upgrade", out var upgrade) &&
-                   upgrade.Equals("websocket", StringComparison.OrdinalIgnoreCase);
-        }
-
-        // 只读取完整请求头中的独立字段，忽略头名大小写及值两侧的空格、制表符。
-        private static bool TryGetHeaderValue(string request, string name, out string value)
-        {
-            value = "";
-            int headerEnd = request.IndexOf("\r\n\r\n", StringComparison.Ordinal);
-            int lineStart = request.IndexOf("\r\n", StringComparison.Ordinal);
-            if (headerEnd < 0 || lineStart < 0) return false;
-
-            bool found = false;
-            lineStart += 2;
-            while (lineStart < headerEnd)
-            {
-                int lineEnd = request.IndexOf("\r\n", lineStart, StringComparison.Ordinal);
-                string line = request.Substring(lineStart, lineEnd - lineStart);
-                int colon = line.IndexOf(':');
-                if (colon > 0 && line.Substring(0, colon).Equals(name, StringComparison.OrdinalIgnoreCase))
-                {
-                    // 拒绝重复字段，避免握手时产生歧义。
-                    if (found) return false;
-                    value = line.Substring(colon + 1).Trim(' ', '\t');
-                    found = true;
-                }
-                lineStart = lineEnd + 2;
-            }
-            return found;
-        }
-
-        private void HandleHttpRequest(NetworkStream stream, string request)
-        {
-            string[] lines = request.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
-            if (lines.Length == 0) return;
-            
-            string path = lines[0].Split(' ').Length > 1 ? lines[0].Split(' ')[1] : "/";
-            
-            if (path.StartsWith("/api/snapshot"))
-            {
-                if (!CheckAuth(request))
-                {
-                    SendHttpResponse(stream, 401, "text/plain", Encoding.UTF8.GetBytes("Unauthorized"), 12);
+                    await RespondAsync(stream, "403 Forbidden", [], deadline.Token);
                     return;
                 }
 
-                using var ms = new MemoryStream();
-                using var writer = new Utf8JsonWriter(ms);
-                _dataProvider(writer);
-                writer.Flush();
-                SendHttpResponse(stream, 200, "application/json", ms.GetBuffer(), (int)ms.Length);
+                await RouteAsync(stream, request, origin, deadline.Token, stopping);
             }
-            else if (path == "/favicon.ico")
+            catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException
+                or System.Security.Authentication.AuthenticationException or WebSocketException or ObjectDisposedException)
             {
-                SendHttpResponse(stream, 404, "text/html", Array.Empty<byte>(), 0);
+                Debug.WriteLine($"[Web connection] {ex.Message}");
             }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[Web request] {ex}");
+            }
+        }
+    }
+
+    private string? RequestOrigin(Request request, int port)
+    {
+        string scheme = _certificate == null ? "http" : "https";
+        string authority = request.Header("Host");
+        if (authority.Length == 0 || authority.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('.' or '-' or ':')))
+            return null;
+        if (!Uri.TryCreate($"{scheme}://{authority}", UriKind.Absolute, out var url))
+            return null;
+        bool allowed = _networkHost == null
+            ? url.Host is "127.0.0.1" or "localhost"
+            : string.Equals(url.Host, _networkHost, StringComparison.OrdinalIgnoreCase);
+        if (!allowed || (url.Port != port && authority.Contains(':')))
+            return null;
+
+        string origin = url.GetLeftPart(UriPartial.Authority);
+        string suppliedOrigin = request.Header("Origin");
+        if (suppliedOrigin.Length != 0 && !string.Equals(suppliedOrigin, origin, StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        return origin;
+    }
+
+    private async Task RouteAsync(Stream stream, Request request, string origin,
+        CancellationToken deadline, CancellationToken stopping)
+    {
+        if (request is { Method: "GET", Path: "/" })
+        {
+            string nonce = Convert.ToBase64String(RandomNumberGenerator.GetBytes(18));
+            string ws = origin.StartsWith("https:", StringComparison.Ordinal) ? "wss" + origin[5..] : "ws" + origin[4..];
+            string html = WebPageContent.IndexHtml
+                .Replace("{{FAVICON}}", $"<link rel='icon' type='image/png' href='data:image/png;base64,{WebPageContent.GetAppIconBase64()}'>")
+                .Replace("{{NONCE}}", nonce)
+                .Replace("{{LANG}}", _language);
+            string csp = $"Content-Security-Policy: default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; img-src data:; connect-src 'self' {ws}; frame-ancestors 'none'; form-action 'self'; base-uri 'none'\r\n";
+            await RespondAsync(stream, "200 OK", Encoding.UTF8.GetBytes(html), deadline, "text/html; charset=utf-8", csp);
+            return;
+        }
+
+        if (request is { Method: "POST", Path: "/api/session" })
+        {
+            await SignInAsync(stream, request, deadline);
+            return;
+        }
+
+        if (request is { Method: "GET", Path: "/api/session" or "/api/snapshot" or "/ws" })
+        {
+            DateTimeOffset? expires = SessionExpiry(request);
+            if (expires == null)
+            {
+                await RespondAsync(stream, "401 Unauthorized", [], deadline);
+                return;
+            }
+
+            if (request.Path == "/ws")
+                await OpenWebSocketAsync(stream, request, expires.Value, deadline, stopping);
+            else if (request.Path == "/api/snapshot")
+                await RespondAsync(stream, "200 OK", Snapshot(), deadline, "application/json");
             else
-            {
-                // 默认返回首页
-                string iconBase64 = WebPageContent.GetAppIconBase64();
-                bool authRequired = !string.IsNullOrEmpty(Settings.Load().WebServerPassword);
-                
-                string html = WebPageContent.IndexHtml
-                    .Replace("{{FAVICON}}", !string.IsNullOrEmpty(iconBase64) ? $"<link rel='icon' type='image/png' href='data:image/png;base64,{iconBase64}'>" : "")
-                    .Replace("{{AUTH_REQUIRED}}", authRequired.ToString().ToLower());
-                
-                byte[] data = Encoding.UTF8.GetBytes(html);
-                SendHttpResponse(stream, 200, "text/html; charset=utf-8", data, data.Length);
-            }
+                await RespondAsync(stream, "204 No Content", [], deadline);
+            return;
         }
 
-        private bool CheckAuth(string requestHeader)
+        await RespondAsync(stream, "404 Not Found", [], deadline);
+    }
+
+    private async Task SignInAsync(Stream stream, Request request, CancellationToken deadline)
+    {
+        if (_passwordHash == null || request.Header("Origin").Length == 0 || request.Body.Length == 0 ||
+            !request.Header("Content-Type").Split(';', 2)[0].Trim().Equals("text/plain", StringComparison.OrdinalIgnoreCase))
         {
-            var pwd = Settings.Load().WebServerPassword;
-            if (string.IsNullOrEmpty(pwd)) return true;
-
-            string firstLine = requestHeader.Split('\n')[0];
-            string[] parts = firstLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 2) return false;
-            int queryStart = parts[1].IndexOf('?');
-            if (queryStart < 0) return false;
-
-            string? suppliedPassword = null;
-            foreach (string parameter in parts[1].Substring(queryStart + 1).Split('&'))
-            {
-                int equals = parameter.IndexOf('=');
-                if (equals < 0 || parameter.Substring(0, equals) != "pwd") continue;
-                // 浏览器使用 encodeURIComponent 编码密码；拒绝重复参数，避免认证歧义。
-                if (suppliedPassword != null) return false;
-                suppliedPassword = System.Net.WebUtility.UrlDecode(parameter.Substring(equals + 1));
-            }
-            return suppliedPassword == pwd;
+            await RespondAsync(stream, "403 Forbidden", [], deadline);
+            return;
         }
 
-        private void SendHttpResponse(NetworkStream stream, int code, string type, byte[] body, int len)
+        bool allowed;
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        lock (_sessionGate)
         {
-            string headers = $"HTTP/1.1 {code} OK\r\nContent-Type: {type}\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
-            byte[] hBytes = Encoding.UTF8.GetBytes(headers);
-            stream.Write(hBytes, 0, hBytes.Length);
-            if (len > 0) stream.Write(body, 0, len);
+            if (now - _loginWindow >= TimeSpan.FromMinutes(1))
+            {
+                _loginWindow = now;
+                _loginAttempts = 0;
+            }
+            allowed = ++_loginAttempts <= 20;
         }
 
-        // --- WebSocket 核心逻辑 ---
-
-        private async Task BroadcastLoop()
+        if (!allowed || !CryptographicOperations.FixedTimeEquals(SHA256.HashData(request.Body), _passwordHash))
         {
-            while (_isRunning)
-            {
-                // [Optimization] 如果没有任何客户端连接，降低循环频率以节省资源
-                if (_wsClients.IsEmpty)
-                {
-                    await Task.Delay(2000);
-                    continue;
-                }
-
-                byte[] buffer = null;
-                try
-                {
-
-                    buffer = ArrayPool<byte>.Shared.Rent(32 * 1024); 
-                    
-                    int payloadLen;
-                    using (var ms = new System.IO.MemoryStream(buffer))
-                    using (var writer = new Utf8JsonWriter(ms))
-                    {
-                        _dataProvider(writer);
-                        writer.Flush();
-                        payloadLen = (int)ms.Position;
-                    }
-
-                    int headerLen = 2;
-                    if (payloadLen >= 65536) headerLen += 8;
-                    else if (payloadLen >= 126) headerLen += 2;
-                    int totalLen = headerLen + payloadLen;
-
-                    // Rent a target buffer for the frame
-                    byte[] frameBuffer = ArrayPool<byte>.Shared.Rent(totalLen);
-                    try
-                    {
-                        int payloadOffset = EncodeFrameHeader(payloadLen, frameBuffer);
-                        Buffer.BlockCopy(buffer, 0, frameBuffer, payloadOffset, payloadLen);
-
-                        // Now we can return the "JSON Scratchpad" buffer IMMEDIATELY!
-                        ArrayPool<byte>.Shared.Return(buffer);
-                        buffer = null; // Prevent double return in finally
-
-                        // Broadcast using frameBuffer
-                        var tasks = new List<Task>();
-                        // Capture the buffer and length for the closure
-                        var bufToSend = frameBuffer; 
-                        var lenToSend = totalLen;
-
-                        foreach (var client in _wsClients.Keys)
-                        {
-                            if (!client.Connected)
-                            {
-                                _wsClients.TryRemove(client, out _);
-                                continue;
-                            }
-                            // We must NOT return frameBuffer until ALL sends are done.
-                            // But since we await Task.WhenAll, it's fine.
-                            tasks.Add(SendFrameSafeAsync(client, bufToSend, lenToSend));
-                        }
-
-                        if (tasks.Count > 0)
-                        {
-                            await Task.WhenAll(tasks);
-                        }
-                    }
-                    finally
-                    {
-                        ArrayPool<byte>.Shared.Return(frameBuffer);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"Broadcast Error: {ex.Message}");
-                }
-                finally
-                {
-                    if (buffer != null) ArrayPool<byte>.Shared.Return(buffer);
-                }
-
-                // 正常广播频率：每秒一次
-                await Task.Delay(1000);
-            }
+            await RespondAsync(stream, allowed ? "401 Unauthorized" : "429 Too Many Requests", [], deadline);
+            return;
         }
 
-        private int EncodeFrameHeader(int payloadLen, byte[] buffer)
+        string token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        bool hasCapacity;
+        lock (_sessionGate)
         {
-            int offset = 0;
-
-            // FIN(1) + RSV(000) + OpCode(1=Text) => 10000001 => 0x81
-            buffer[offset++] = 0x81;
-
-            // Mask(0) + Length
-            if (payloadLen < 126)
-            {
-                buffer[offset++] = (byte)payloadLen;
-            }
-            else if (payloadLen <= 65535)
-            {
-                buffer[offset++] = 126;
-                buffer[offset++] = (byte)((payloadLen >> 8) & 0xFF);
-                buffer[offset++] = (byte)(payloadLen & 0xFF);
-            }
-            else
-            {
-                buffer[offset++] = 127;
-                // 64-bit length
-                buffer[offset++] = 0; buffer[offset++] = 0; buffer[offset++] = 0; buffer[offset++] = 0;
-                buffer[offset++] = (byte)((payloadLen >> 24) & 0xFF);
-                buffer[offset++] = (byte)((payloadLen >> 16) & 0xFF);
-                buffer[offset++] = (byte)((payloadLen >> 8) & 0xFF);
-                buffer[offset++] = (byte)(payloadLen & 0xFF);
-            }
-            return offset;
+            foreach (var expired in _sessions.Where(pair => pair.Value <= now).Select(pair => pair.Key).ToArray())
+                _sessions.Remove(expired);
+            hasCapacity = _sessions.Count < 64;
+            if (hasCapacity) _sessions.Add(token, now + SessionLifetime);
         }
-
-        private async Task SendFrameSafeAsync(TcpClient client, byte[] buffer, int length)
+        if (!hasCapacity)
         {
-            try
-            {
-                var stream = client.GetStream();
-                // [Fix] Add timeout to prevent memory leak from stuck tasks
-                using var cts = new CancellationTokenSource(2000); // 2s timeout
-                await stream.WriteAsync(buffer, 0, length, cts.Token);
-            }
-            catch
-            {
-                // Remove dead client
-                _wsClients.TryRemove(client, out _);
-                try { client.Close(); } catch { }
-            }
+            await RespondAsync(stream, "429 Too Many Requests", [], deadline);
+            return;
         }
 
+        await RespondAsync(stream, "204 No Content", [], deadline, headers:
+            $"Set-Cookie: __Host-LiteMonitor={token}; Max-Age=1800; Path=/; Secure; HttpOnly; SameSite=Strict\r\n");
+    }
 
-        private async Task ReceiveLoop(TcpClient client)
+    private DateTimeOffset? SessionExpiry(Request request)
+    {
+        if (_passwordHash == null) return DateTimeOffset.MaxValue;
+
+        foreach (string entry in request.Header("Cookie").Split(';', StringSplitOptions.TrimEntries))
         {
-            byte[] buffer = null;
-            try
-            {
-                var stream = client.GetStream();
-                // [Optimization] Use ArrayPool for receive buffer
-                buffer = ArrayPool<byte>.Shared.Rent(1024);
-
-                while (client.Connected && _wsClients.ContainsKey(client))
-                {
-                    // 阻塞读取，如果断开会抛出异常或返回0
-                    int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
-                    if (bytesRead == 0) break; // 客户端关闭连接
-
-                    // 解析帧头判断是否为 Close 帧 (OpCode = 8)
-                    // 0x88 = 1000 1000 = FIN + Close
-                    if ((buffer[0] & 0x0F) == 0x08)
-                    {
-                        break; // 收到关闭帧
-                    }
-                }
-            }
-            catch { }
-            finally
-            {
-                if (buffer != null) ArrayPool<byte>.Shared.Return(buffer);
-                _wsClients.TryRemove(client, out _);
-                try { client.Close(); } catch { }
-            }
+            const string name = "__Host-LiteMonitor=";
+            if (!entry.StartsWith(name, StringComparison.Ordinal)) continue;
+            lock (_sessionGate)
+                return _sessions.TryGetValue(entry[name.Length..], out var expiry) && expiry > DateTimeOffset.UtcNow
+                    ? expiry : null;
         }
 
-        private bool Handshake(NetworkStream stream, string request)
+        return null;
+    }
+
+    private async Task OpenWebSocketAsync(Stream stream, Request request, DateTimeOffset expires,
+        CancellationToken handshake, CancellationToken stopping)
+    {
+        string key = request.Header("Sec-WebSocket-Key");
+        byte[] decoded = new byte[16];
+        if (!request.Header("Upgrade").Equals("websocket", StringComparison.OrdinalIgnoreCase) ||
+            !request.Header("Connection").Split(',').Any(value => value.Trim().Equals("upgrade", StringComparison.OrdinalIgnoreCase)) ||
+            request.Header("Sec-WebSocket-Version") != "13" || request.Header("Origin").Length == 0 ||
+            !Convert.TryFromBase64String(key, decoded, out int size) || size != decoded.Length)
         {
-            try
-            {
-                if (!CheckAuth(request))
-                {
-                    SendHttpResponse(stream, 401, "text/plain", Encoding.UTF8.GetBytes("Unauthorized"), 12);
-                    return false;
-                }
-
-                // 1. 提取并校验握手键，标准要求其为 16 字节随机值的 Base64 编码。
-                if (!TryGetHeaderValue(request, "Sec-WebSocket-Key", out var key)) return false;
-                if (Convert.FromBase64String(key).Length != 16) return false;
-
-                // 2. 生成 Accept Key (Magic String: 258EAFA5-E914-47DA-95CA-C5AB0DC85B11)
-                string magic = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-                byte[] hash = SHA1.HashData(Encoding.UTF8.GetBytes(magic));
-                string acceptKey = Convert.ToBase64String(hash);
-
-                // 3. 发送握手响应
-                var response = new StringBuilder();
-                response.Append("HTTP/1.1 101 Switching Protocols\r\n");
-                response.Append("Connection: Upgrade\r\n");
-                response.Append("Upgrade: websocket\r\n");
-                response.Append($"Sec-WebSocket-Accept: {acceptKey}\r\n");
-                response.Append("\r\n");
-
-                byte[] respBytes = Encoding.UTF8.GetBytes(response.ToString());
-                stream.Write(respBytes, 0, respBytes.Length);
-                return true;
-            }
-            catch { return false; }
+            await RespondAsync(stream, "400 Bad Request", [], handshake);
+            return;
         }
+
+        string accept = Convert.ToBase64String(SHA1.HashData(Encoding.ASCII.GetBytes(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")));
+        string response = $"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n";
+        await stream.WriteAsync(Encoding.ASCII.GetBytes(response), handshake);
+
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+        if (expires != DateTimeOffset.MaxValue)
+        {
+            var remaining = expires - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero) return;
+            lifetime.CancelAfter(remaining);
+        }
+        using var socket = WebSocket.CreateFromStream(stream, isServer: true, subProtocol: null,
+            keepAliveInterval: TimeSpan.FromSeconds(20));
+        var receiver = ReceiveAsync(socket, lifetime);
+        try
+        {
+            using var interval = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            do
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+                timeout.CancelAfter(TimeSpan.FromSeconds(2));
+                await socket.SendAsync(Snapshot().AsMemory(), WebSocketMessageType.Text, true, timeout.Token);
+            } while (await interval.WaitForNextTickAsync(lifetime.Token));
+        }
+        finally
+        {
+            lifetime.Cancel();
+            await receiver;
+        }
+    }
+
+    private static async Task ReceiveAsync(WebSocket socket, CancellationTokenSource lifetime)
+    {
+        try
+        {
+            byte[] buffer = new byte[256];
+            // The monitor is read-only. A data message ends the connection.
+            await socket.ReceiveAsync(buffer.AsMemory(), lifetime.Token);
+        }
+        catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or IOException) { }
+        finally { lifetime.Cancel(); }
+    }
+
+    private byte[] Snapshot()
+    {
+        lock (_snapshotGate)
+        {
+            long now = Environment.TickCount64;
+            if (_snapshot.Length != 0 && now - _snapshotTime < 900) return _snapshot;
+
+            var buffer = new ArrayBufferWriter<byte>(4096);
+            using (var writer = new Utf8JsonWriter(buffer)) _dataProvider(writer);
+            _snapshot = buffer.WrittenSpan.ToArray();
+            _snapshotTime = now;
+            return _snapshot;
+        }
+    }
+
+    private static async Task<Request?> ReadRequestAsync(Stream stream, CancellationToken cancellationToken)
+    {
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(MaxHeaderBytes);
+        try
+        {
+            int read = 0, end = -1;
+            while (end < 0 && read < MaxHeaderBytes)
+            {
+                int searchFrom = Math.Max(0, read - 3);
+                int count = await stream.ReadAsync(buffer.AsMemory(read, MaxHeaderBytes - read), cancellationToken);
+                if (count == 0) return null;
+                read += count;
+                int match = buffer.AsSpan(searchFrom, read - searchFrom).IndexOf("\r\n\r\n"u8);
+                if (match >= 0) end = searchFrom + match;
+            }
+
+            if (end < 0) return null;
+            string[] lines = Encoding.ASCII.GetString(buffer, 0, end).Split("\r\n");
+            string[] parts = lines[0].Split(' ');
+            if (parts.Length != 3 || parts[2] != "HTTP/1.1" ||
+                parts[0] is not ("GET" or "POST") || !parts[1].StartsWith('/'))
+                return null;
+
+            var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string line in lines.Skip(1))
+            {
+                int colon = line.IndexOf(':');
+                if (colon < 1 || !headers.TryAdd(line[..colon], line[(colon + 1)..].Trim()))
+                    return null;
+            }
+
+            if (headers.ContainsKey("Transfer-Encoding")) return null;
+            int length = 0;
+            if (headers.TryGetValue("Content-Length", out var value) &&
+                (!int.TryParse(value, out length) || length is < 0 or > MaxPasswordBytes))
+                return null;
+            if (parts[0] == "GET" && length != 0) return null;
+
+            int start = end + 4;
+            int available = read - start;
+            if (available > length) return null;
+            byte[] body = new byte[length];
+            buffer.AsSpan(start, available).CopyTo(body);
+            if (available < length)
+                await stream.ReadExactlyAsync(body.AsMemory(available), cancellationToken);
+
+            return new Request(parts[0], parts[1], headers, body);
+        }
+        finally { ArrayPool<byte>.Shared.Return(buffer, clearArray: true); }
+    }
+
+    private static async Task RespondAsync(Stream stream, string status, byte[] body, CancellationToken deadline,
+        string contentType = "text/plain; charset=utf-8", string headers = "")
+    {
+        string reply = $"HTTP/1.1 {status}\r\nConnection: close\r\nContent-Type: {contentType}\r\n" +
+            $"Content-Length: {body.Length}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n" +
+            $"Referrer-Policy: no-referrer\r\n{headers}\r\n";
+        await stream.WriteAsync(Encoding.ASCII.GetBytes(reply), deadline);
+        if (body.Length > 0) await stream.WriteAsync(body, deadline);
+    }
+
+    private sealed record Request(string Method, string Path, Dictionary<string, string> Headers, byte[] Body)
+    {
+        public string Header(string name) => Headers.GetValueOrDefault(name, "");
     }
 }

@@ -295,7 +295,7 @@ namespace LiteMonitor.src.UI.Helpers
                     try { using (var form = new CleanMemoryForm()) await form.StartCleaningAsync(); } catch { } 
                     break;
                 case 5:
-                    Core.Actions.WebActions.OpenWebMonitor(_cfg);
+                    Core.Actions.WebActions.OpenWebMonitor();
                     break;
                 case 0: 
                 default:

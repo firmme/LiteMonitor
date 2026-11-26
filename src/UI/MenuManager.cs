@@ -112,42 +112,41 @@ namespace LiteMonitor
 
             // 2. 子项：打开网页 (动态获取 IP)
             var itemWebOpen = new ToolStripMenuItem(LanguageManager.T("Menu.OpenWeb")); // 请确保语言包有 "Menu.OpenWeb"
-            itemWebOpen.Enabled = cfg.WebServerEnabled; // 只有开启时才可用
-
-            // 事件：切换开关
-            itemWebEnable.CheckedChanged += (s, e) => 
+            var copyWeb = new ToolStripMenuItem(LanguageManager.T("Menu.WebCopyAddress"));
+            void RefreshWebActions()
             {
-                // 1. 更新配置
+                var server = LiteMonitor.src.WebServer.LiteWebServer.Instance;
+                itemWebOpen.Enabled = copyWeb.Enabled = server?.Address != null;
+                itemWeb.ToolTipText = server?.LastError ?? server?.Address?.AbsoluteUri ?? LanguageManager.T("Menu.WebStopped");
+            }
+
+            itemWebEnable.Click += (_, _) =>
+            {
+                bool previous = cfg.WebServerEnabled;
                 cfg.WebServerEnabled = itemWebEnable.Checked;
-                cfg.Save(); 
-
-                // 2. ★ 立即应用（调用 AppActions 重启服务）
-                AppActions.ApplyWebServer(cfg); 
-                
-                // 3. 刷新“打开网页”按钮的可用状态
-                itemWebOpen.Enabled = cfg.WebServerEnabled;
-
-                // 4. [新增] 开启时弹窗引导
-                if (cfg.WebServerEnabled)
+                string? error = LiteMonitor.src.WebServer.LiteWebServer.Validate(cfg);
+                if (error == null && cfg.TrySave(out error))
                 {
-                    string msg = LanguageManager.T("Menu.WebServerTip");
-                    if (MessageBox.Show(msg, "LiteMonitor", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) == DialogResult.OK)
-                    {
-                        itemWebOpen.PerformClick();
-                    }
+                    AppActions.ApplyWebServer();
+                    error = LiteMonitor.src.WebServer.LiteWebServer.Instance?.LastError;
                 }
+                else
+                {
+                    cfg.WebServerEnabled = previous;
+                    itemWebEnable.Checked = previous;
+                }
+
+                RefreshWebActions();
+                if (error != null)
+                    MessageBox.Show(error, itemWeb.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             };
 
-            // 事件：打开网页
-            itemWebOpen.Click += (s, e) => 
-            {
-                WebActions.OpenWebMonitor(cfg);
-            };
-
-            itemWeb.ToolTipText = LanguageManager.T("Menu.WebServerTip");
-            // 将子项加入父菜单
+            itemWebOpen.Click += (_, _) => WebActions.OpenWebMonitor();
+            copyWeb.Click += (_, _) => WebActions.CopyWebAddress();
+            RefreshWebActions();
             itemWeb.DropDownItems.Add(itemWebEnable);
             itemWeb.DropDownItems.Add(itemWebOpen);
+            itemWeb.DropDownItems.Add(copyWeb);
             // 将父菜单加入“显示模式”组 (或者您可以根据喜好移到 menu.Items.Add(itemWeb) 放到外层)
             modeRoot.DropDownItems.Add(itemWeb);
             
@@ -597,11 +596,11 @@ namespace LiteMonitor
             moreRoot.DropDownItems.Add(itemCheckUpdate);
 
             var itemFeedback = new ToolStripMenuItem(LanguageManager.T("Menu.Feedback"));
-            itemFeedback.Click += (_, __) => SystemActions.OpenUrl("https://github.com/Diorser/LiteMonitor/issues");
+            itemFeedback.Click += (_, __) => SystemActions.OpenUrl("https://github.com/firmme/LiteMonitor/issues");
             moreRoot.DropDownItems.Add(itemFeedback);
 
             var itemChangelog = new ToolStripMenuItem(LanguageManager.T("Menu.Changelog"));
-            itemChangelog.Click += (_, __) => SystemActions.OpenUrl("https://github.com/Diorser/LiteMonitor/releases");
+            itemChangelog.Click += (_, __) => SystemActions.OpenUrl("https://github.com/firmme/LiteMonitor/releases");
             moreRoot.DropDownItems.Add(itemChangelog);
 
             var itemAbout = new ToolStripMenuItem(LanguageManager.T("Menu.About"));

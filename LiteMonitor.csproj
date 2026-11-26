@@ -13,9 +13,9 @@
     <DebugType>none</DebugType>
 		<DebugSymbols>false</DebugSymbols>
 	  
-    <Version>1.3.8</Version><!-- 程序主版本（UpdateChecker / About用） -->
+    <Version>1.3.9</Version><!-- 程序主版本（UpdateChecker / About用） -->
     <AssemblyVersion>1.0.0.0</AssemblyVersion><!-- 稳定不动 -->
-    <FileVersion>1.3.8.0</FileVersion><!-- 文件属性显示 -->
+    <FileVersion>1.3.9.0</FileVersion><!-- 文件属性显示 -->
   </PropertyGroup>
 
 
@@ -42,9 +42,6 @@
         </Content>
     </ItemGroup>
 	<ItemGroup>
-		<Content Include="resources\LiteMonitor.Updater.exe">
-			<CopyToOutputDirectory>Always</CopyToOutputDirectory>
-		</Content>
     <Content Include="使用说明(必读).txt" Condition="Exists('使用说明(必读).txt')">
 			<CopyToOutputDirectory>Always</CopyToOutputDirectory>
 		</Content>
@@ -54,11 +51,8 @@
 <ItemGroup>
   <Compile Remove="test\**" />
   <Compile Remove="LiteMonitor.Updater\**" />
-  <Compile Remove="LiteMonitor.Wpf\**" />
   <EmbeddedResource Remove="LiteMonitor.Updater\**" />
-  <EmbeddedResource Remove="LiteMonitor.Wpf\**" />
   <None Remove="LiteMonitor.Updater\**" />
-  <None Remove="LiteMonitor.Wpf\**" />
 </ItemGroup>
 	
 <!-- 引入文件资源管理 -->
@@ -79,4 +73,31 @@
   <ItemGroup>
     <Folder Include="src\UI\Settings\" />
   </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="LiteMonitor.Updater\LiteMonitor.Updater.csproj"
+                      ReferenceOutputAssembly="false"
+                      SkipGetTargetFrameworkProperties="true"
+                      GlobalPropertiesToRemove="SelfContained;PublishSingleFile;RuntimeIdentifier;PublishDir;Version;FileVersion" />
+  </ItemGroup>
+
+  <Target Name="BuildBundledUpdater" BeforeTargets="GetCopyToOutputDirectoryItems;ComputeFilesToPublish"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+    <PropertyGroup>
+      <BundledUpdaterDir>$(MSBuildProjectDirectory)\LiteMonitor.Updater\bin\$(Configuration)\bundled\</BundledUpdaterDir>
+    </PropertyGroup>
+    <MSBuild Projects="LiteMonitor.Updater\LiteMonitor.Updater.csproj"
+             Targets="Publish"
+             Properties="Configuration=$(Configuration);LiteMonitorBundledPublishDir=$(BundledUpdaterDir)"
+             RemoveProperties="SelfContained;PublishSingleFile;RuntimeIdentifier;RuntimeIdentifiers;Version;FileVersion;TargetFramework;Platform;PlatformTarget;PublishDir" />
+    <ItemGroup>
+      <ContentWithTargetPath Include="$(BundledUpdaterDir)LiteMonitor.Updater.exe"
+                             TargetPath="resources\LiteMonitor.Updater.exe"
+                             CopyToOutputDirectory="PreserveNewest" />
+      <ResolvedFileToPublish Include="$(BundledUpdaterDir)LiteMonitor.Updater.exe"
+                             RelativePath="resources\LiteMonitor.Updater.exe"
+                             CopyToPublishDirectory="PreserveNewest"
+                             ExcludeFromSingleFile="true" />
+    </ItemGroup>
+  </Target>
 </Project>

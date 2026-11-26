@@ -82,7 +82,6 @@ namespace LiteMonitor.src.UI.SettingsPage
                 AutoSize = true, Visible = false, ForeColor = UIColors.TextSub, Font = UIFonts.Bold(9F)
             };
             
-            // Immediate binding to avoid conflict with MainPanelPage
             _chkLinkHorizontal.CheckedChanged += (s, e) => {
                 if (Config != null) Config.HorizontalFollowsTaskbar = _chkLinkHorizontal.Checked;
             };
@@ -166,7 +165,6 @@ namespace LiteMonitor.src.UI.SettingsPage
             base.OnShow();
             if (Config == null) return;
 
-            // Sync Checkbox if in taskbar tab (in case it was changed in MainPanelPage)
             if (_isTaskbarTab)
                 _chkLinkHorizontal.Checked = Config.HorizontalFollowsTaskbar;
 
@@ -309,16 +307,7 @@ namespace LiteMonitor.src.UI.SettingsPage
                 _container.Controls.AddRange(controlsToAdd.ToArray());
 
             // 底部提示文案
-            var bottomLabel = new Label 
-            { 
-                Text = LanguageManager.T("Menu.MonitorItemTip"), 
-                AutoSize = true, 
-                ForeColor = UIColors.TextSub, 
-                Font = new Font("Microsoft YaHei UI", 8.5F),
-                Dock = DockStyle.Bottom,
-                Padding = new Padding(0, 25, 20, 10)
-            };
-            _container.Controls.Add(bottomLabel);
+
             }
             finally
             {
@@ -399,7 +388,7 @@ namespace LiteMonitor.src.UI.SettingsPage
             header.MoveDown += GroupHeader_MoveDown;
             header.ToggleGroup += (s, checkState) => 
             {
-                foreach(MonitorItemRow row in rowsPanel.Controls) row.SetPanelChecked(checkState);
+                foreach(MonitorItemRow row in rowsPanel.Controls) row.SetVisible(checkState);
             };
             header.Tag = block;
 

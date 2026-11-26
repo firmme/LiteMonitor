@@ -57,7 +57,7 @@ internal static class Program
                 return Task.CompletedTask;
             });
         }
-        await Run("特殊字符密码可正常认证且拒绝重复参数", AuthTest);
+        await Run("HTTPS 会话可以使用含空格和符号的密码登录", AuthTest);
         await Run("未完整发送的请求头不能进入快照处理", PartialHeaderTest);
         await Run("慢请求头在截止时间后释放连接", HeaderTimeoutTest);
         await Run("超过上限的请求头不能进入快照处理", HeaderSizeTest);
@@ -144,25 +144,39 @@ internal static class Program
         return Task.CompletedTask;
     }
 
-    private static Task AuthTest()
+    private static async Task AuthTest()
     {
-        var manager = new WebSessionManager(_ => { });
-        var auth = typeof(WebSessionManager).GetMethod("CheckAuth", Private)!;
-        bool Accept(string target) => (bool)auth.Invoke(manager, new object[] { $"GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n" })!;
-        try
+        using var key = RSA.Create(2048);
+        var request = new CertificateRequest("CN=localhost", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        var san = new SubjectAlternativeNameBuilder();
+        san.AddDnsName("localhost");
+        request.CertificateExtensions.Add(san.Build());
+        using var generated = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(10));
+        var certificate = new X509Certificate2(generated.Export(X509ContentType.Pfx));
+        string fingerprint = certificate.GetCertHashString(HashAlgorithmName.SHA256);
+        const string password = "中文空 格 +&=% local";
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        string origin = $"https://localhost:{((IPEndPoint)listener.LocalEndpoint).Port}";
+        using var manager = new WebSessionManager(writer =>
         {
-            foreach (var password in new[] { "中文空 格+&=%", "a+b", "a b", "plain" })
-            {
-                Settings.Load().WebServerPassword = password;
-                string encoded = Uri.EscapeDataString(password);
-                Check(Accept("/api/snapshot?pwd=" + encoded), "编码后的密码认证失败");
-                Check(!Accept("/api/snapshot?pwd=wrong"), "错误密码通过认证");
-                Check(!Accept("/api/snapshot?pwd=" + encoded + "&pwd=wrong"), "重复密码参数应拒绝");
-                Check(!Accept("/api/snapshot?other=pwd=" + encoded), "非独立参数通过认证");
-            }
-        }
-        finally { Settings.Load().WebServerPassword = ""; }
-        return Task.CompletedTask;
+            writer.WriteStartObject();
+            writer.WriteEndObject();
+        }, certificate, "localhost", password);
+        manager.Start(listener);
+        using var http = new HttpClient(new HttpClientHandler
+        {
+            ServerCertificateCustomValidationCallback = (_, cert, _, _) =>
+                cert?.GetCertHashString(HashAlgorithmName.SHA256) == fingerprint
+        }) { BaseAddress = new Uri(origin), Timeout = TimeSpan.FromSeconds(8) };
+        using var initial = await http.GetAsync("/api/session");
+        Check(initial.StatusCode == HttpStatusCode.Unauthorized, "网络访问需要会话");
+        using var signIn = new HttpRequestMessage(HttpMethod.Post, "/api/session");
+        signIn.Headers.Add("Origin", origin);
+        signIn.Content = new StringContent(password, Encoding.UTF8, "text/plain");
+        using var loggedIn = await http.SendAsync(signIn);
+        Check(loggedIn.StatusCode == HttpStatusCode.NoContent, "登录失败");
+        Check(await http.GetStringAsync("/api/snapshot") == "{}", "登录后未收到快照");
     }
 
     private static async Task PartialHeaderTest()
@@ -208,14 +222,13 @@ internal static class Program
         using var client = new TcpClient();
         await client.ConnectAsync((IPEndPoint)listener.LocalEndpoint);
         using var accepted = await listener.AcceptTcpClientAsync();
-        var manager = new WebSessionManager(w => { w.WriteStartObject(); w.WriteEndObject(); });
+        using var manager = new WebSessionManager(w => { w.WriteStartObject(); w.WriteEndObject(); });
         var handler = manager.HandleClientAsync(accepted);
         try { await test(client, client.GetStream(), handler); }
         finally
         {
             client.Close();
             listener.Stop();
-            manager.Stop();
             await handler.WaitAsync(TimeSpan.FromSeconds(2));
         }
     }

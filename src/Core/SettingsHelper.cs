@@ -78,19 +78,34 @@ namespace LiteMonitor
 
         public static void Save(this Settings settings)
         {
-            if (GlobalBlockSave) return;
+            if (!settings.TrySave(out var error))
+                System.Diagnostics.Debug.WriteLine($"[Settings] {error}");
+        }
 
-            try
+        public static bool TrySave(this Settings settings, out string? error)
+        {
+            lock (settings.MonitorItemsLock)
+            lock (_ioLock)
             {
-                var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
-                lock (_ioLock)
+                if (GlobalBlockSave)
                 {
-                    AtomicWrite(json);
+                    error = "Settings are being reset.";
+                    return false;
                 }
-            }
-            catch
-            {
-                CleanupTempFile();
+
+                try
+                {
+                    var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
+                    AtomicWrite(json);
+                    error = null;
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    CleanupTempFile();
+                    error = ex.Message;
+                    return false;
+                }
             }
         }
 

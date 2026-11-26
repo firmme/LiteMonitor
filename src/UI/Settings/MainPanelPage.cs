@@ -4,8 +4,9 @@ using System.Windows.Forms;
 using System.Linq;
 using LiteMonitor.src.Core;
 using LiteMonitor.src.UI.Controls;
-using System.Diagnostics;
 using LiteMonitor.src.SystemServices;
+using LiteMonitor.src.WebServer;
+using LiteMonitor.src.Core.Actions;
 
 namespace LiteMonitor.src.UI.SettingsPage
 {
@@ -26,7 +27,8 @@ namespace LiteMonitor.src.UI.SettingsPage
         public override void OnShow()
         {
             base.OnShow();
-            if (Config == null || _isLoaded) return;
+            if (Config == null) return;
+            if (_isLoaded) { RefreshWebStatus(); return; }
 
             _container.SuspendLayout();
             ClearAndDispose(_container.Controls);
@@ -121,11 +123,6 @@ namespace LiteMonitor.src.UI.SettingsPage
 
           
 
-            // 1. Follow Taskbar
-            groupHorz.AddToggle(this, "Menu.HorizontalFollowsTaskbar", 
-                () => Config.HorizontalFollowsTaskbar, 
-                v => Config.HorizontalFollowsTaskbar = v);
-                
             // 2. Single Line
             groupHorz.AddToggle(this, "Menu.TaskbarSingleLine",
                 () => Config.HorizontalSingleLine,
@@ -143,88 +140,66 @@ namespace LiteMonitor.src.UI.SettingsPage
             AddGroupToPage(groupHorz);
         }
 
+        private Label? _webStatus;
+        private Button? _openWeb;
+        private Button? _copyWeb;
+
         private void CreateWebCard()
         {
-            var group = new LiteSettingsGroup(LanguageManager.T("Menu.WebServer")); 
+            var group = new LiteSettingsGroup(LanguageManager.T("Menu.WebServer"));
+            var enabled = group.AddToggle(this, "Menu.WebServer", () => Config.WebServerEnabled,
+                value => Config.WebServerEnabled = value);
+            var scope = group.AddComboIndex(this, "Menu.WebAccessScope",
+                new[] { LanguageManager.T("Menu.WebThisPc"), LanguageManager.T("Menu.WebNetworkHttps") },
+                () => Config.WebServerNetworkAccess ? 1 : 0, value => Config.WebServerNetworkAccess = value == 1);
+            scope.Width = UIUtils.S(170);
+            var port = group.AddInt(this, "Menu.WebServerPort", "", () => Config.WebServerPort,
+                value => Config.WebServerPort = value);
+            var certificate = group.AddInput(this, "Menu.WebCertificate", () => Config.WebServerCertificateThumbprint ?? "",
+                value => Config.WebServerCertificateThumbprint = value, width: 230);
+            var password = group.AddInput(this, "Menu.WebServerPassword", () => Config.WebServerPassword,
+                value => Config.WebServerPassword = value, LanguageManager.T("Menu.WebPasswordHint"), width: 180);
+            password.Inner.UseSystemPasswordChar = true;
+            password.Inner.MaxLength = 256;
 
-            // A. Header with Action Button
-            group.AddButton(LanguageManager.T("Menu.WebServerTip"), LanguageManager.T("Menu.OpenWeb"), () => 
+            void SynchronizeScope()
             {
-                Core.Actions.WebActions.OpenWebMonitor(Config);
-            });
+                scope.Enabled = port.Enabled = enabled.Checked;
+                certificate.Parent!.Visible = password.Parent!.Visible = enabled.Checked && Config.WebServerNetworkAccess;
+            }
 
-            // B. Settings
-            group.AddToggle(this, "Menu.WebServer", 
-                () => Config.WebServerEnabled, 
-                v => Config.WebServerEnabled = v
-            );
+            enabled.CheckedChanged += (_, _) => SynchronizeScope();
+            scope.Inner.SelectedIndexChanged += (_, _) => SynchronizeScope();
+            RegisterRefresh(SynchronizeScope);
 
-            group.AddInt(this, "Menu.WebServerPort", "", 
-                () => Config.WebServerPort, 
-                v => Config.WebServerPort = v,
-                60
-            );
-
-            
-
-            // Password
-            group.AddInput(this, "Menu.WebServerPassword",
-                () => Config.WebServerPassword,
-                v => Config.WebServerPassword = v,
-                LanguageManager.T("Menu.WebServerPasswordTip"),
-                100, HorizontalAlignment.Center);
-
-            // C. API Link
-            bool isChinese = !string.IsNullOrEmpty(Config.Language) && 
-                                     Config.Language.StartsWith("zh", StringComparison.OrdinalIgnoreCase);
-            
-            group.AddLink("API (JSON): http://<IP>:<Port>/api/snapshot?pwd=123456 ", 
-                isChinese ? "内网无法连接？" : "Connection Issue?", 
-                () => ShowFirewallHelp(isChinese));
+            _webStatus = new Label
+            {
+                Dock = DockStyle.Top,
+                Padding = UIUtils.S(new Padding(12, 6, 12, 6)),
+                AutoSize = true,
+                MaximumSize = new Size(UIUtils.S(490), 0),
+                ForeColor = UIColors.TextSub
+            };
+            group.AddFullItem(_webStatus);
+            _openWeb = new LiteButton(LanguageManager.T("Menu.OpenWeb"), false);
+            _copyWeb = new LiteButton(LanguageManager.T("Menu.WebCopyAddress"), false);
+            _openWeb.Click += (_, _) => WebActions.OpenWebMonitor();
+            _copyWeb.Click += (_, _) => WebActions.CopyWebAddress();
+            var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+            actions.Controls.AddRange([_openWeb, _copyWeb]);
+            group.AddAction(LanguageManager.T("Menu.WebAddress"), actions);
 
             AddGroupToPage(group);
+            SynchronizeScope();
+            RefreshWebStatus();
         }
 
-        private void ShowFirewallHelp(bool isChinese)
+        internal void RefreshWebStatus()
         {
-            try
-            {
-                Process.Start(new ProcessStartInfo("firewall.cpl") { UseShellExecute = true });
-
-                string msg;
-                if (isChinese)
-                {
-                    msg = "如果您在首次启动时的【Windows 防火墙授权弹窗】中点击了“取消”，\n" +
-                          "或者是直接关闭了弹窗，会导致手机无法内网访问网页。\n\n" +
-                          "已为你打开防火墙设置，请按以下步骤手动“解封”：\n" +
-                          "------------------------------\n" +
-                          "1. 【关键】请点击新窗口左上侧的【允许应用或功能通过 Windows Defender 防火墙】。\n" +
-                          "2. 点击右上角的【更改设置】按钮（如果是灰色的）。\n" +
-                          "3. 在列表中找到【LiteMonitor】。\n" +
-                          "4. ★ 必须打三个勾（缺一不可）：\n" +
-                          "   ✅ 左侧名字【LiteMonitor】\n" +
-                          "   ✅ 右侧【专用】\n" +
-                          "   ✅ 右侧【公用】\n" +
-                          "5. 点击底部的【确定】保存。";
-                }
-                else
-                {
-                    msg = "If you clicked 'Cancel' or closed the firewall permission dialog on the first launch,\n" +
-                          "your mobile device will not be able to connect to the web page.\n\n" +
-                          "The firewall settings have been opened for you. Please follow these steps:\n" +
-                          "------------------------------\n" +
-                          "1. [Critical] Click 'Allow an app or feature through Windows Defender Firewall' on the top-left.\n" +
-                          "2. Click the 'Change settings' button (if greyed out).\n" +
-                          "3. Find 'LiteMonitor' in the list.\n" +
-                          "4. ★ You MUST check all three boxes:\n" +
-                          "   ✅ Left Name [LiteMonitor]\n" +
-                          "   ✅ Right [Private]\n" +
-                          "   ✅ Right [Public]\n" +
-                          "5. Click [OK] at the bottom to save.";
-                }
-                MessageBox.Show(msg, isChinese ? "内网连接修复指引" : "Connection Fix Guide", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
-            catch (Exception ex) { MessageBox.Show(ex.Message); }
+            if (_webStatus == null || _openWeb == null || _copyWeb == null) return;
+            var server = LiteWebServer.Instance;
+            _webStatus.Text = server?.LastError ?? server?.Address?.AbsoluteUri ?? LanguageManager.T("Menu.WebStopped");
+            _openWeb.Enabled = _copyWeb.Enabled = server?.Address != null;
         }
 
         private void AddGroupToPage(LiteSettingsGroup group)

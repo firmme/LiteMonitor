@@ -312,7 +312,7 @@ namespace LiteMonitor.src.Plugins
 
             // 2. Monitor Items Visibility Check
             string prefix = PluginConstants.DASH_PREFIX + instanceId + ".";
-            lock (settings.MonitorItems)
+            lock (settings.MonitorItemsLock)
             {
                 foreach (var item in settings.MonitorItems)
                 {

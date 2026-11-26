@@ -5,7 +5,7 @@
 A lightweight and fully customizable **Windows hardware monitor** — track CPU, GPU, memory, disk, and network statistics in real time.
 
 > 🟢 **Download latest version:**  
-> [📦 GitHub Releases → LiteMonitor Latest](https://github.com/Diorser/LiteMonitor/releases/latest)  
+> [📦 GitHub Releases → LiteMonitor Latest](https://github.com/firmme/LiteMonitor/releases/latest)
 > [⏬ Download Website](https://litemonitor.cn/)
 
 LiteMonitor is a modern **Windows desktop system monitoring tool**.  
@@ -54,7 +54,7 @@ It supports horizontal/vertical display, multiple languages, theme switching, tr
 | 👆 **Click-Through Mode** | Allows mouse interactions to pass through the window. |
 | 🎨 **Instant Theme/Language Switching** | No restart required; UI updates immediately. |
 | 🔍 **Smart Value Formatting** | Automatic unit conversion, adaptive decimals; horizontal mode removes `/s`, trims decimals for large values. |
-| 🔄 **Auto Update Check** | Silent background check on startup; popup only when triggered manually. |
+| 🔄 **Auto Update Check** | Checks GitHub Releases on startup and verifies the release signature before installation. |
 | 🚀 **Auto Startup** | Uses Windows Task Scheduler (supports elevated run). |
 | 📂 **Persistent Settings** | All preferences saved to `settings.json` in real time. |
 
@@ -62,7 +62,7 @@ It supports horizontal/vertical display, multiple languages, theme switching, tr
 
 ## 📦 Installation
 
-1. Download from [GitHub Releases](https://github.com/Diorser/LiteMonitor/releases)
+1. Download from [GitHub Releases](https://github.com/firmme/LiteMonitor/releases)
 2. Extract and run `LiteMonitor.exe`
 3. The app automatically loads the correct theme & language
 
@@ -146,7 +146,7 @@ Example:
 | `LanguageManager.cs` | Localization loader with flattened key access |
 | `HardwareMonitor.cs` | Collects CPU/GPU/MEM/NET/DISK data; smart device auto-selection |
 | `AutoStart.cs` | Manages Windows Task Scheduler startup task |
-| `UpdateChecker.cs` | GitHub + China mirror version checking |
+| `UpdateChecker.cs` | GitHub Releases and signed updates |
 | `AboutForm.cs` | About dialog |
 
 ---
@@ -160,7 +160,7 @@ Example:
 
 ### Build
 ```bash
-git clone https://github.com/Diorser/LiteMonitor.git
+git clone https://github.com/firmme/LiteMonitor.git
 cd LiteMonitor
 dotnet build -c Release
 ```
@@ -179,8 +179,14 @@ Released under the **MIT License** (free for personal & commercial use).
 
 ## 💬 Contact
 **Author:** Diorser  
-**GitHub:** https://github.com/Diorser/LiteMonitor
+**GitHub:** https://github.com/firmme/LiteMonitor
 
 ---
 
 <!-- SEO Keywords: Windows hardware monitor, system monitor, desktop performance widget, traffic monitor alternative, CPU GPU temperature monitor, open-source hardware monitor, lightweight system widget, memory and network usage tracker -->
+
+## Publishing updates
+
+Run build/New-SignedRelease.ps1 in PowerShell 7 with Version and CertificateThumbprint. The certificate must be in the current Windows user's Personal store and match resources/update-public-key.pem. The script outputs a ZIP and its .sig file.
+
+Publish both files as assets on the same vX.Y.Z GitHub Release. Install the first signed build manually to bootstrap updates pinned to this public key.

@@ -22,17 +22,8 @@ namespace LiteMonitor.src.Plugins
     public class PluginExecutor : IDisposable
     {
         private HttpClient _http;
-        private readonly ConcurrentDictionary<string, Task<string>> _inflightRequests = new();
-        private readonly object _httpLock = new object();
-        
-        // Key = InstanceID_StepID_ParamsHash
-        private class CacheItem
-        {
-            public string RawResponse { get; set; } 
-            public DateTime Timestamp { get; set; }
-        }
-        
-        private readonly ConcurrentDictionary<string, CacheItem> _stepCache = new();
+        private readonly PluginRequestCache _requests = new();
+        private readonly object _httpLock = new();
 
         public event Action OnSchemaChanged;
 
@@ -112,21 +103,10 @@ namespace LiteMonitor.src.Plugins
                 client.Dispose();
             }
             _proxyClients.Clear();
-            _stepCache.Clear();
+            _requests.Clear();
         }
 
-        public void ClearCache(string instanceId = null)
-        {
-            if (string.IsNullOrEmpty(instanceId))
-            {
-                _stepCache.Clear();
-            }
-            else
-            {
-                var keysToRemove = _stepCache.Keys.Where(k => k.StartsWith(instanceId)).ToList();
-                foreach (var k in keysToRemove) _stepCache.TryRemove(k, out _);
-            }
-        }
+        public void ClearCache(string? instanceId = null) => _requests.Clear(instanceId);
 
         public async Task<bool> ExecuteInstanceAsync(PluginInstanceConfig inst, PluginTemplate tmpl, System.Threading.CancellationToken token = default)
         {
@@ -304,78 +284,31 @@ namespace LiteMonitor.src.Plugins
 
                 string body = PluginProcessor.ResolveTemplate(step.Body ?? "", context);
 
-                string contentHash = (url + "|" + body).GetHashCode().ToString("X"); 
-                string cacheKey = $"{inst.Id}{keySuffix}_{step.Id}_{contentHash}";
+                string? proxy = step.Proxy;
+                if (proxy?.Contains("{{", StringComparison.Ordinal) == true)
+                    proxy = PluginProcessor.ResolveTemplate(proxy, context);
+                var headers = ResolveHeaders(step.Headers, context);
+                var requestKey = PluginRequestCache.Key.Create(inst.Id, keySuffix, step.Id, url, body,
+                    step.Method, proxy, step.ResponseEncoding, headers);
 
-                bool hit = false;
-                string resultRaw = "";
-
-                if (step.CacheMinutes > 0)
-                {
-                    if (_stepCache.TryGetValue(cacheKey, out var cached))
-                    {
-                        if (DateTime.Now - cached.Timestamp < TimeSpan.FromMinutes(step.CacheMinutes))
-                        {
-                            resultRaw = cached.RawResponse;
-                            hit = true;
-                        }
-                        else
-                        {
-                            _stepCache.TryRemove(cacheKey, out _); 
-                        }
-                    }
-                }
-
+                bool hit = _requests.TryRead(requestKey, step.CacheMinutes, out string resultRaw);
                 if (!hit)
                 {
-                    // [Feature] Support Native Native Handlers (Weather, Crypto)
-                    if (url.StartsWith("native://"))
+                    if (url.StartsWith("native://", StringComparison.Ordinal))
                     {
-                        resultRaw = await ExecuteNativeAsync(url, context);
+                        resultRaw = await ExecuteNativeAsync(url);
                     }
                     else
                     {
-                        string proxy = step.Proxy;
-                        if (!string.IsNullOrEmpty(proxy) && proxy.Contains("{{"))
-                        {
-                             proxy = PluginProcessor.ResolveTemplate(proxy, context);
-                        }
-                        // 1. 先解析 Header 中的占位符 (例如 Authorization: Bearer {{token}})
-                        var resolvedHeaders = ResolveHeaders(step.Headers, context);
-                        
-                        // Request Coalescing
-                        var task = _inflightRequests.GetOrAdd(cacheKey, _ => FetchRawAsync(step.Method, url, body, resolvedHeaders, step.ResponseEncoding, CancellationToken.None, proxy));     
-                        
-                        try 
-                        {
-                            // Wait with cancellation support
-                            var tcs = new TaskCompletionSource<string>();
-                            using (token.Register(() => tcs.TrySetCanceled()))
-                            {
-                                var sw = System.Diagnostics.Stopwatch.StartNew();
-                                var finishedTask = await Task.WhenAny(task, tcs.Task);
-                                if (finishedTask == tcs.Task) throw new OperationCanceledException(token);
-                                resultRaw = await task;
-                                sw.Stop();
-                                context["__latency__"] = sw.ElapsedMilliseconds.ToString();
-                            }
-                        }
-                        catch (OperationCanceledException)
-                        {
-                            throw;
-                        }
-                        catch (Exception)
-                        {
-                            _inflightRequests.TryRemove(cacheKey, out _);
-                            throw;
-                        }
-                        finally
-                        {
-                             _inflightRequests.TryRemove(cacheKey, out _);
-                        }
+                        var stopwatch = Stopwatch.StartNew();
+                        resultRaw = await _requests.FetchAsync(requestKey,
+                            () => FetchRawAsync(requestKey.Method, url, body, headers,
+                                step.ResponseEncoding, CancellationToken.None, requestKey.Proxy), token);
+                        context["__latency__"] = stopwatch.ElapsedMilliseconds.ToString();
                     }
                 }
 
+                token.ThrowIfCancellationRequested();
                 // Parse
                 ParseAndExtract(resultRaw, step.Extract, context, step.ResponseFormat);
                 
@@ -401,35 +334,8 @@ namespace LiteMonitor.src.Plugins
 
                 // [Fix] Update Cache AFTER successful parsing and processing
                 // This ensures we don't cache invalid data (e.g. HTML error pages that passed HTTP check but failed JSON parse)
-                if (!hit && step.CacheMinutes != 0)
-                {
-                    // [Optimization] Prevent large blobs from polluting cache (limit 500KB)
-                    if (resultRaw != null && resultRaw.Length > 500 * 1024)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"Plugin response too large to cache ({resultRaw.Length} bytes). Key: {cacheKey}");
-                    }
-                    else
-                    {
-                        // [Optimization] Prevent unbounded growth with timestamp-based eviction
-                        if (_stepCache.Count > 100)
-                        {
-                            // Evict oldest items first
-                            var keysToRemove = _stepCache
-                                .OrderBy(kv => kv.Value.Timestamp)
-                                .Take(20)
-                                .Select(kv => kv.Key)
-                                .ToList();
-                                
-                            foreach(var k in keysToRemove) _stepCache.TryRemove(k, out _);
-                        }
-
-                        _stepCache[cacheKey] = new CacheItem
-                        {
-                            RawResponse = resultRaw,
-                            Timestamp = DateTime.Now
-                        };
-                    }
-                }
+                token.ThrowIfCancellationRequested();
+                if (!hit) _requests.Store(requestKey, resultRaw, step.CacheMinutes);
             }
             catch (OperationCanceledException)
             {
@@ -452,25 +358,28 @@ namespace LiteMonitor.src.Plugins
                 lock (_httpLock) return _http;
             }
 
-            return _proxyClients.GetOrAdd(proxy.Trim(), p => 
+            lock (_httpLock)
             {
-                var handler = new SocketsHttpHandler();
-                handler.Proxy = new System.Net.WebProxy(p);
-                handler.UseProxy = true;
-                // 补上这一行，确保代理请求也能解压缩
-                handler.AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate;
-                // [Fix] Limit pooled connections for proxies too
-                handler.PooledConnectionLifetime = TimeSpan.FromMinutes(2);
-                handler.MaxConnectionsPerServer = 20;
-                
-                var client = new HttpClient(handler);
-                client.Timeout = TimeSpan.FromSeconds(10);
-                client.DefaultRequestHeaders.Add("User-Agent", "LiteMonitor/1.0");
-                return client;
-            });
+                return _proxyClients.GetOrAdd(proxy.Trim(), p =>
+                {
+                    var handler = new SocketsHttpHandler();
+                    handler.Proxy = new System.Net.WebProxy(p);
+                    handler.UseProxy = true;
+                    // 补上这一行，确保代理请求也能解压缩
+                    handler.AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate;
+                    // [Fix] Limit pooled connections for proxies too
+                    handler.PooledConnectionLifetime = TimeSpan.FromMinutes(2);
+                    handler.MaxConnectionsPerServer = 20;
+
+                    var client = new HttpClient(handler);
+                    client.Timeout = TimeSpan.FromSeconds(10);
+                    client.DefaultRequestHeaders.Add("User-Agent", "LiteMonitor/1.0");
+                    return client;
+                });
+            }
         }
 
-        private async Task<string> ExecuteNativeAsync(string url, Dictionary<string, string> context)
+        private async Task<string> ExecuteNativeAsync(string url)
         {
             // url: native://citycode?province=...
             var uri = new Uri(url);
@@ -514,8 +423,8 @@ namespace LiteMonitor.src.Plugins
         private async Task<string> FetchRawAsync(string methodStr, string url, string body, Dictionary<string, string> headers, string encoding, System.Threading.CancellationToken token, string proxy = null)
         {
             HttpMethod method = HttpMethod.Get;
-            if (methodStr?.ToUpper() == "POST") method = HttpMethod.Post;
-            else if (methodStr?.ToUpper() == "HEAD") method = HttpMethod.Head;
+            if (methodStr == "POST") method = HttpMethod.Post;
+            else if (methodStr == "HEAD") method = HttpMethod.Head;
             
             // Log($"[Start] {method} {url} Proxy:{proxy ?? "None"}");
 
@@ -543,7 +452,7 @@ namespace LiteMonitor.src.Plugins
 
                 byte[] bytes = await response.Content.ReadAsByteArrayAsync(token);
                 
-                if (encoding?.ToLower() == "gbk")
+                if (string.Equals(encoding, "gbk", StringComparison.OrdinalIgnoreCase))
                 {
                     return Encoding.GetEncoding("GBK").GetString(bytes);
                 }

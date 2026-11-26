@@ -141,6 +141,8 @@ namespace LiteMonitor
 
         public bool WebServerEnabled { get; set; } = false;
         public int WebServerPort { get; set; } = 5000; // 默认端口
+        public bool WebServerNetworkAccess { get; set; }
+        public string WebServerCertificateThumbprint { get; set; } = "";
         public string WebServerPassword { get; set; } = ""; // 访问密码
         
         public ThresholdsSet Thresholds { get; set; } = new ThresholdsSet();
@@ -151,6 +153,9 @@ namespace LiteMonitor
         [JsonIgnore] public DateTime LastAutoSaveTime { get; set; } = DateTime.MinValue;
 
         public Dictionary<string, string> GroupAliases { get; set; } = new Dictionary<string, string>();
+        [JsonIgnore]
+        internal object MonitorItemsLock { get; } = new();
+
         public List<MonitorItemConfig> MonitorItems { get; set; } = new List<MonitorItemConfig>();
         public List<PluginInstanceConfig> PluginInstances { get; set; } = new List<PluginInstanceConfig>();
 
@@ -193,7 +198,8 @@ namespace LiteMonitor
 
         public Settings DeepClone()
         {
-            var json = System.Text.Json.JsonSerializer.Serialize(this);
+            string json;
+            lock (MonitorItemsLock) json = System.Text.Json.JsonSerializer.Serialize(this);
             return System.Text.Json.JsonSerializer.Deserialize<Settings>(json) ?? new Settings();
         }
     }

@@ -310,7 +310,7 @@ namespace LiteMonitor.src.UI.Helpers
                 case 2: OpenSettings(); break;
                 case 3: OpenTrafficHistory(); break;
                 case 4: CleanMemory(); break;
-                case 5: WebActions.OpenWebMonitor(_cfg); break;
+                case 5: WebActions.OpenWebMonitor(); break;
                 case 0: default: ToggleLayoutMode(); break;
             }
         }
@@ -344,9 +344,9 @@ namespace LiteMonitor.src.UI.Helpers
         {
             try
             {
+                CheckUpdateResult();
                 if (HardwareMonitor.Instance != null) await HardwareMonitor.Instance.SmartCheckDriver();
                 await UpdateChecker.CheckAsync();
-                CheckUpdateSuccess();
 
                 // 如果发现新版本，重新构建菜单以显示“发现新版本”按钮
                 if (UpdateChecker.IsUpdateFound)
@@ -362,16 +362,53 @@ namespace LiteMonitor.src.UI.Helpers
             catch { }
         }
 
-        private void CheckUpdateSuccess()
+        private void CheckUpdateResult()
         {
-            string tokenPath = Path.Combine(AppContext.BaseDirectory, "update_success");
-            if (File.Exists(tokenPath))
+            string root = AppContext.BaseDirectory;
+            string failure = Path.Combine(root, "update_failed");
+            bool succeeded = !File.Exists(failure);
+            string marker = succeeded ? Path.Combine(root, "update_success") : failure;
+            if (!File.Exists(marker)) return;
+
+            try
             {
-                try { File.Delete(tokenPath); } catch { }
-                string title = "⚡️LiteMonitor_v" + UpdateChecker.GetCurrentVersion();
-                string content = _cfg.Language == "zh" ? "🎉 软件已成功更新到最新版本！" : "🎉 Software updated to latest version!";
-                ShowNotification(title, content, ToolTipIcon.Info);
+                string stage = File.ReadAllText(marker);
+                File.Delete(marker);
+                const string prefix = ".update-";
+                if (stage.StartsWith(prefix, StringComparison.Ordinal) &&
+                    Guid.TryParseExact(stage[prefix.Length..], "N", out var id))
+                {
+                    string resources = Path.Combine(root, "resources");
+                    string path = Path.Combine(resources, prefix + id.ToString("N"));
+                    _ = Task.Run(async () =>
+                    {
+                        for (int attempt = 0; attempt < 5; attempt++)
+                        {
+                            await Task.Delay(1000);
+                            try
+                            {
+                                if (!Directory.Exists(path)) return;
+                                if (File.GetAttributes(resources).HasFlag(FileAttributes.ReparsePoint) ||
+                                    File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint)) return;
+                                Directory.Delete(path, recursive: true);
+                                return;
+                            }
+                            catch (IOException) { }
+                            catch (UnauthorizedAccessException) { return; }
+                        }
+                    });
+                }
             }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+
+            bool chinese = _cfg.Language is "zh" or "zh-tw";
+            string message = succeeded
+                ? (chinese ? "更新已安装。" : "The update was installed.")
+                : (chinese ? "更新失败，已恢复原版本。详情见 update_error.log。" :
+                    "Update failed and the previous version was restored. See update_error.log.");
+            ShowNotification($"LiteMonitor v{UpdateChecker.GetCurrentVersion()}", message,
+                succeeded ? ToolTipIcon.Info : ToolTipIcon.Warning);
         }
 
         public void Dispose()

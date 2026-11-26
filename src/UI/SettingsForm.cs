@@ -6,6 +6,7 @@ using LiteMonitor.src.Core;
 using LiteMonitor.src.Core.Actions;
 using LiteMonitor.src.UI.Controls;
 using LiteMonitor.src.UI.SettingsPage;
+using LiteMonitor.src.WebServer;
 
 namespace LiteMonitor.src.UI
 {
@@ -104,7 +105,7 @@ namespace LiteMonitor.src.UI
             var btnApply = new LiteButton(LanguageManager.T("Menu.Apply"), false);
             var btnReset = new LiteButton(LanguageManager.T("Menu.Reset"), false) { ForeColor = UIColors.TextWarn };
 
-            btnOk.Click += (s, e) => { ApplySettings(); this.DialogResult = DialogResult.OK; this.Close(); };
+            btnOk.Click += (s, e) => { if (ApplySettings()) { DialogResult = DialogResult.OK; Close(); } };
             btnCancel.Click += (s, e) => { this.DialogResult = DialogResult.Cancel; this.Close(); };
             btnApply.Click += (s, e) => { ApplySettings(); };
             
@@ -209,7 +210,7 @@ namespace LiteMonitor.src.UI
             }
         }
 
-        private void ApplySettings()
+        private bool ApplySettings()
         {
             bool oldAutoStart = _cfg.AutoStart;
 
@@ -238,19 +239,46 @@ namespace LiteMonitor.src.UI
                 MessageBox.Show("为了防止所有可交互入口都被死锁（隐藏或穿透+隐藏托盘），已强制显示托盘图标。", "LiteMonitor", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
 
-            // 2. 合并变更到 Live Settings
-            SettingsChanger.Merge(_cfg, _draftCfg);
+            if (LiteWebServer.Validate(_draftCfg) is { } validationError)
+            {
+                SwitchPage("MainPanel");
+                MessageBox.Show(this, validationError, LanguageManager.T("Menu.WebServer"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+
+            string? saveError;
+            lock (_cfg.MonitorItemsLock)
+            {
+                try
+                {
+                    var candidate = _cfg.DeepClone();
+                    SettingsChanger.Merge(candidate, _draftCfg);
+                    if (candidate.TrySave(out saveError))
+                        SettingsChanger.Merge(_cfg, _draftCfg);
+                }
+                catch (Exception ex)
+                {
+                    saveError = ex.Message;
+                }
+            }
+
+            if (saveError != null)
+            {
+                MessageBox.Show(this, saveError, LanguageManager.T("Menu.SettingsSaveFailed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+
             bool autoStartChanged = oldAutoStart != _cfg.AutoStart;
-
-            // 3. 持久化保存
-            _cfg.Save();
-            
-            // 4. 应用副作用 (刷新界面)
             AppActions.ApplyAllSettings(_cfg, _mainForm, _ui, autoStartChanged);
-
-            // 5. [Fix] Rebase Draft to match Live
-            // 将 Live 环境中由插件生成的最新监控项同步回 Draft，并保留动态显示属性
-            SettingsChanger.RebaseDraftMonitorItems(_cfg, _draftCfg);
+            lock (_cfg.MonitorItemsLock)
+                SettingsChanger.RebaseDraftMonitorItems(_cfg, _draftCfg);
+            if (_pages["MainPanel"] is MainPanelPage mainPanel) mainPanel.RefreshWebStatus();
+            if (LiteWebServer.Instance?.LastError is not null)
+            {
+                SwitchPage("MainPanel");
+                return false;
+            }
+            return true;
         }
     }
 }

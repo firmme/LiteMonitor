@@ -63,13 +63,13 @@ namespace LiteMonitor
             _tooltipHelper = new TaskbarTooltipHelper(this, _cfg, _ui);
             ReloadLayout();
 
-            _timer.Interval = Math.Max(_cfg.RefreshMs, 60);
             _timer.Tick += (_, __) => Tick();
             _timer.Start();
         }
 
         public void ReloadLayout()
         {
+            _timer.Interval = Math.Max(_cfg.RefreshMs, 60);
             _nextHandleLookup = 0;
             _styleDirty = true;
             _bizHelper.CheckTheme(true);

@@ -29,41 +29,28 @@ namespace LiteMonitor.src.UI.Controls
 
     public class MonitorItemRow : Panel
     {
-        public MonitorItemConfig Config { get; private set; }
+        public MonitorItemConfig Config { get; }
 
-        private Label _lblId;           
-        private Label _lblName;         
-        
-        private LiteUnderlineInput _inputName;  
-        private LiteUnderlineInput _inputShort; 
-        
-        // ★★★ [新增] 单位输入框 ★★★
-        private LiteUnderlineInput _inputUnit;
+        private readonly MonitorTextField _name;
+        private readonly MonitorTextField _unit;
+        private readonly LiteCheck _visible;
+        private readonly bool _taskbar;
 
-        private LiteCheck _chkPanel;            
-        private LiteCheck _chkTaskbar;          
-        
-        private LiteSortBtn _btnUp;
-        private LiteSortBtn _btnDown;
+        public event EventHandler? MoveUp;
+        public event EventHandler? MoveDown;
 
-        private bool _isTaskbarMode = false; // 记录当前模式
-
-        public event EventHandler MoveUp;
-        public event EventHandler MoveDown;
-
-        // ★★★ 修改构造函数：增加 isTaskbarMode 参数 ★★★
         public MonitorItemRow(MonitorItemConfig item, bool isTaskbarMode)
         {
-            this.Config = item;
-            this._isTaskbarMode = isTaskbarMode; // 记录模式
-            this.Dock = DockStyle.Top;
-            this.Height = MonitorLayout.H_ROW;
-            this.BackColor = Color.White;
+            Config = item;
+            _taskbar = isTaskbarMode;
+            Dock = DockStyle.Top;
+            Height = MonitorLayout.H_ROW;
+            BackColor = Color.White;
 
-            // 1. ID Label (主界面模式)
-            _lblId = new Label
+            string resolved = isTaskbarMode ? MetricLabelResolver.ResolveLabel(item) : item.Key;
+            var label = new Label
             {
-                Text = item.Key,
+                Text = string.IsNullOrWhiteSpace(resolved) ? DefaultName(item, shortName: false) : resolved,
                 Location = new Point(MonitorLayout.X_COL1, UIUtils.S(14)),
                 Size = new Size(UIUtils.S(110), UIUtils.S(20)),
                 AutoEllipsis = true,
@@ -71,267 +58,146 @@ namespace LiteMonitor.src.UI.Controls
                 Font = UIFonts.Regular(8F)
             };
 
-            // 2. Name Label (任务栏模式)
-            // [Refactor] 使用统一解析器
-            string labelResolved = MetricLabelResolver.ResolveLabel(item);
-            
-            string defName = LanguageManager.T(UIUtils.Intern("Items." + item.Key));
-            string valName = !string.IsNullOrEmpty(labelResolved) ? labelResolved : defName;
-            
-            _lblName = new Label
+            var unitContext = isTaskbarMode ? MetricUtils.UnitContext.SettingsTaskbar : MetricUtils.UnitContext.SettingsPanel;
+            _name = new MonitorTextField(isTaskbarMode ? item.TaskbarLabel : item.UserLabel, DefaultName(item, isTaskbarMode),
+                hideValue: " ", defaultValue: "", width: 148)
             {
-                Text = valName, 
-                Location = new Point(MonitorLayout.X_COL1, UIUtils.S(14)),
-                Size = new Size(UIUtils.S(110), UIUtils.S(20)),
-                AutoEllipsis = true,
-                // [需求2] 字体样式与主界面Tab(_lblId)保持一致
-                ForeColor = UIColors.TextSub, 
-                Font = UIFonts.Regular(8F),
-                Visible = false 
+                Location = new Point(MonitorLayout.X_COL2, UIUtils.S(8))
+            };
+            _unit = new MonitorTextField(isTaskbarMode ? item.UnitTaskbar : item.UnitPanel,
+                MetricUtils.GetUnitStr(item.Key, 0, unitContext), hideValue: "", defaultValue: null, width: 82)
+            {
+                Location = new Point(MonitorLayout.X_COL_UNIT, UIUtils.S(8))
             };
 
-            // 3. Name Input
-            _inputName = new LiteUnderlineInput(valName, "", "", 100, UIColors.TextMain) 
-            { Location = new Point(MonitorLayout.X_COL2, UIUtils.S(8)) };
-
-            // 4. Short Input
-            // [Refactor] 使用统一解析器
-            string shortResolved = MetricLabelResolver.ResolveShortLabel(item);
-
-            string defShortKey = UIUtils.Intern("Short." + item.Key);
-            string defShort = LanguageManager.T(defShortKey);
-            if (defShort.StartsWith("Short.")) defShort = item.Key.Split('.')[1]; 
-            
-            string valShort = !string.IsNullOrEmpty(shortResolved) ? shortResolved : defShort;
-            
-            _inputShort = new LiteUnderlineInput(valShort, "", "", 80, UIColors.TextMain) 
-            { Location = new Point(MonitorLayout.X_COL2, UIUtils.S(8)), Visible = false };
-
-            // ★★★ 5. [新增] Unit Input 初始化逻辑 ★★★
-            // 1. 根据传入的模式，获取正确的默认单位 (如 Panel="{u}/s", Taskbar="{u}")
-            // 使用 Settings 上下文，确保用户能看到 {u} 占位符
-            var unitCtx = isTaskbarMode ? MetricUtils.UnitContext.SettingsTaskbar : MetricUtils.UnitContext.SettingsPanel;
-            string defUnit = MetricUtils.GetUnitStr(item.Key, 0, unitCtx);
-            
-            // 2. 获取当前配置值
-            string userConfig = isTaskbarMode ? item.UnitTaskbar : item.UnitPanel;
-            
-            // 3. 决定显示文本 (null显示默认值, ""显示空格)
-            // 注意：如果配置是""(隐藏)，我们给输入框显示一个空格" "，让用户知道这里不是空的(默认)，而是特意留空的。
-            string displayUnit;
-            if (userConfig == null) displayUnit = defUnit;   // Auto -> 显示默认
-            else if (userConfig == "") displayUnit = " ";    // Hide -> 显示空格
-            else displayUnit = userConfig;                   // Custom -> 显示自定义
-
-            // 4. 初始化输入框 (Placeholder 设为 defUnit)
-            _inputUnit = new LiteUnderlineInput(displayUnit, "", "", 50, UIColors.TextSub)
-            { Location = new Point(MonitorLayout.X_COL_UNIT, UIUtils.S(8)) };
-            _inputUnit.Inner.Font = UIFonts.Regular(8F);
-
-            // 6. Checkboxes
-            _chkPanel = new LiteCheck(item.VisibleInPanel, LanguageManager.T("Menu.MainForm")) 
-            { Location = new Point(MonitorLayout.X_COL3, UIUtils.S(10)) };
-            
-            _chkTaskbar = new LiteCheck(item.VisibleInTaskbar, LanguageManager.T("Menu.Taskbar")) 
-            { Location = new Point(MonitorLayout.X_COL3, UIUtils.S(10)), Visible = false };
-
-            // 7. Sort Buttons
-            _btnUp = new LiteSortBtn("▲") { Location = new Point(MonitorLayout.X_COL4, UIUtils.S(10)) };
-            _btnDown = new LiteSortBtn("▼") { Location = new Point(MonitorLayout.X_COL4 + UIUtils.S(36), UIUtils.S(10)) };
-            
-            _btnUp.Click += (s, e) => MoveUp?.Invoke(this, EventArgs.Empty);
-            _btnDown.Click += (s, e) => MoveDown?.Invoke(this, EventArgs.Empty);
-
-            this.Controls.AddRange(new Control[] { 
-                _lblId, _lblName, 
-                _inputName, _inputShort, _inputUnit, // 加在这里
-                _chkPanel, _chkTaskbar, 
-                _btnUp, _btnDown 
-            });
-
-            // ★★★ 立即应用模式可见性 ★★★
-            ApplyModeVisibility();
-        }
-
-        // 提取出来的可见性设置方法
-        private void ApplyModeVisibility()
-        {
-            if (_isTaskbarMode)
+            _visible = new LiteCheck(isTaskbarMode ? item.VisibleInTaskbar : item.VisibleInPanel,
+                LanguageManager.T(isTaskbarMode ? "Menu.Taskbar" : "Menu.MainForm"))
             {
-                _lblId.Visible = false; _lblName.Visible = true; 
-                _inputName.Visible = false; _inputShort.Visible = true;
-                _chkPanel.Visible = false; _chkTaskbar.Visible = true;
-            }
-            else
-            {
-                _lblId.Visible = true; _lblName.Visible = false;
-                _inputName.Visible = true; _inputShort.Visible = false;
-                _chkPanel.Visible = true; _chkTaskbar.Visible = false;
-            }
+                Location = new Point(MonitorLayout.X_COL3, UIUtils.S(10))
+            };
+            var up = new LiteSortBtn("▲") { Location = new Point(MonitorLayout.X_COL4, UIUtils.S(10)) };
+            var down = new LiteSortBtn("▼") { Location = new Point(MonitorLayout.X_COL4 + UIUtils.S(36), UIUtils.S(10)) };
+            up.Click += (_, _) => MoveUp?.Invoke(this, EventArgs.Empty);
+            down.Click += (_, _) => MoveDown?.Invoke(this, EventArgs.Empty);
+            Controls.AddRange([label, _name, _unit, _visible, up, down]);
         }
 
-        // [需求2] 暴露方法供组开关调用
-        public void SetPanelChecked(bool check) 
+        private static string DefaultName(MonitorItemConfig item, bool shortName)
         {
-            _chkPanel.Checked = check;
+            string property = shortName ? "PROP.ShortLabel." : "PROP.Label.";
+            string dynamicName = InfoService.Instance.GetValue(property + item.Key);
+            if (!string.IsNullOrWhiteSpace(dynamicName)) return dynamicName;
+            string? cached = shortName ? item.DynamicTaskbarLabel : item.DynamicLabel;
+            if (!string.IsNullOrWhiteSpace(cached)) return cached;
+            string key = (shortName ? "Short." : "Items.") + item.Key;
+            string original = LanguageManager.GetOriginal(key);
+            return original == item.Key ? item.Key[(item.Key.LastIndexOf('.') + 1)..] : original;
         }
 
-        public void SetMode(bool isTaskbarMode)
-        {
-            // 如果模式没变，直接返回
-            if (_isTaskbarMode == isTaskbarMode) return;
-            
-            _isTaskbarMode = isTaskbarMode;
-
-            // 重新获取默认值和配置
-            // 使用 Settings 上下文，确保切换模式时，Placeholder 依然正确显示带 {u} 的格式
-            // [Fix] 根据模式动态选择上下文
-            var unitCtx = isTaskbarMode ? MetricUtils.UnitContext.SettingsTaskbar : MetricUtils.UnitContext.SettingsPanel;
-            string defUnit = MetricUtils.GetUnitStr(Config.Key, 0, unitCtx);
-            string userConfig = isTaskbarMode ? Config.UnitTaskbar : Config.UnitPanel;
-
-            // 更新 Input 状态
-            // null -> 默认, "" -> 空格
-            string display = (userConfig == null) ? defUnit : (userConfig == "" ? " " : userConfig);
-            _inputUnit.Inner.Text = display;
-            
-            ApplyModeVisibility();
-        }
+        public void SetVisible(bool check) => _visible.Checked = check;
 
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            using (var p = new Pen(UIColors.Border))
-                e.Graphics.DrawLine(p, MonitorLayout.X_COL1, Height - 1, Width - UIUtils.S(20), Height - 1);
+            using var pen = new Pen(UIColors.Border);
+            e.Graphics.DrawLine(pen, MonitorLayout.X_COL1, Height - 1, Width - UIUtils.S(20), Height - 1);
         }
 
         public void SyncToConfig()
         {
-            // Name
-            string valName = _inputName.Inner.Text; // 不使用 Trim，允许用户输入空格隐藏
-            string originalName = LanguageManager.GetOriginal(UIUtils.Intern("Items." + Config.Key));
-            
-            // [Fix] Handle untranslated plugin keys (e.g. DASH.UniversalAPI.0.val)
-            // If GetOriginal returns the full key (fallback), try to extract the last part as the field name
-            if (Config.Key.StartsWith("DASH.") && originalName.Contains("DASH."))
+            if (_taskbar)
             {
-                int lastDot = originalName.LastIndexOf('.');
-                if (lastDot >= 0 && lastDot < originalName.Length - 1) 
-                    originalName = originalName.Substring(lastDot + 1);
-            }
-
-            // 规范化：如果是纯空格，则转为一个空格
-            if (valName.Length > 0 && string.IsNullOrWhiteSpace(valName))
-            {
-                 valName = " ";
-                 // 即时反馈
-                 if (_inputName.Inner.Text != valName) _inputName.Inner.Text = valName;
+                Config.TaskbarLabel = _name.Value!;
+                Config.UnitTaskbar = _unit.Value;
+                Config.VisibleInTaskbar = _visible.Checked;
             }
             else
             {
-                // 否则去掉首尾空格
-                string trimmed = valName.Trim();
-                if (trimmed != valName) 
+                Config.UserLabel = _name.Value!;
+                Config.UnitPanel = _unit.Value;
+                Config.VisibleInPanel = _visible.Checked;
+            }
+        }
+
+        private sealed class MonitorTextField : Panel
+        {
+            private enum Mode { Default, Custom, Hidden }
+
+            private readonly LiteUnderlineInput _input;
+            private readonly ContextMenuStrip _choices = new();
+            private readonly string _defaultText;
+            private readonly string? _defaultValue;
+            private readonly string _hideValue;
+            private string _custom = "";
+            private Mode _mode;
+
+            public MonitorTextField(string? stored, string defaultText, string hideValue, string? defaultValue, int width)
+            {
+                _defaultText = defaultText;
+                _defaultValue = defaultValue;
+                _hideValue = hideValue;
+                Size = UIUtils.S(new Size(width, 27));
+
+                var menu = new LiteSortBtn("⌄") { Dock = DockStyle.Right };
+                _input = new LiteUnderlineInput("", fontColor: UIColors.TextMain) { Dock = DockStyle.Fill };
+                Controls.Add(_input);
+                Controls.Add(menu);
+                menu.Click += (_, _) => _choices.Show(menu, 0, menu.Height);
+                _input.Inner.ContextMenuStrip = _choices;
+                AccessibleName = menu.AccessibleName = LanguageManager.T("Menu.FieldDisplayMode");
+
+                AddChoice("Menu.FieldDefault", Mode.Default);
+                AddChoice("Menu.FieldCustom", Mode.Custom);
+                AddChoice("Menu.FieldHidden", Mode.Hidden);
+
+                bool noValue = stored == null || stored == defaultValue;
+                bool hidden = !noValue && string.IsNullOrWhiteSpace(stored);
+                if (!noValue && !hidden) _custom = stored!;
+                Select(noValue ? Mode.Default : hidden ? Mode.Hidden : Mode.Custom, focus: false);
+            }
+
+            public string? Value => _mode switch
+            {
+                Mode.Hidden => _hideValue,
+                Mode.Custom when !string.IsNullOrWhiteSpace(_input.Inner.Text) => _input.Inner.Text.Trim(),
+                _ => _defaultValue
+            };
+
+            private void AddChoice(string key, Mode mode)
+            {
+                var item = new ToolStripMenuItem(LanguageManager.T(key)) { Tag = mode };
+                item.Click += (_, _) => Select(mode, focus: true);
+                _choices.Items.Add(item);
+            }
+
+            private void Select(Mode mode, bool focus)
+            {
+                if (_mode == Mode.Custom) _custom = _input.Inner.Text;
+                _mode = mode;
+                foreach (ToolStripMenuItem item in _choices.Items)
+                    item.Checked = (Mode)item.Tag! == mode;
+
+                _input.SetTextColor(mode == Mode.Custom ? UIColors.TextMain : UIColors.TextSub);
+                _input.Inner.ReadOnly = mode != Mode.Custom;
+                _input.Inner.TabStop = mode == Mode.Custom;
+                _input.Inner.Text = mode switch
                 {
-                    valName = trimmed;
-                    _inputName.Inner.Text = valName;
+                    Mode.Custom => string.IsNullOrEmpty(_custom) ? _defaultText : _custom,
+                    Mode.Hidden => LanguageManager.T("Menu.FieldHidden"),
+                    _ => _defaultText.Length == 0 ? LanguageManager.T("Menu.FieldDefault") : _defaultText
+                };
+                if (focus && mode == Mode.Custom)
+                {
+                    _input.Inner.Focus();
+                    _input.Inner.SelectAll();
                 }
             }
 
-            // [Improvement] Check against current runtime dynamic label as well
-            string currentDynamicLabel = InfoService.Instance.GetValue("PROP.Label." + Config.Key);
-            if (string.IsNullOrEmpty(currentDynamicLabel)) currentDynamicLabel = Config.DynamicLabel;
-
-            // 如果等于默认值，或者等于当前的动态值，则存为空字符串 (恢复自动模式)
-            // 否则存为用户自定义值 (锁定模式)
-            if (valName != " " && (string.Equals(valName, originalName, StringComparison.OrdinalIgnoreCase) || valName == currentDynamicLabel))
-                Config.UserLabel = "";
-            else
-                Config.UserLabel = valName;
-
-            // Short (TaskbarLabel)
-            // ★★★ 修复：允许用户输入空格 (" ") 来隐藏标签 ★★★
-            string rawShort = _inputShort.Inner.Text;
-            string valShort;
-            
-            // Handle space logic for short label
-            if (rawShort.Length > 0 && string.IsNullOrWhiteSpace(rawShort))
+            protected override void Dispose(bool disposing)
             {
-                valShort = " ";
+                if (disposing) _choices.Dispose();
+                base.Dispose(disposing);
             }
-            else
-            {
-                valShort = rawShort.Trim();
-            }
-            
-            // 同样应用动态值检查逻辑
-            string defShortKey = UIUtils.Intern("Short." + Config.Key);
-            // [Fix] Must use GetOriginal to ignore current user overrides, otherwise it will toggle back to default
-            string defShort = LanguageManager.GetOriginal(defShortKey); 
-            
-            // 获取当前理论上的动态 Short (InfoService > DynamicShort > null)
-            string currentDynamicShort = InfoService.Instance.GetValue("PROP.ShortLabel." + Config.Key);
-            if (string.IsNullOrEmpty(currentDynamicShort)) currentDynamicShort = Config.DynamicTaskbarLabel;
-
-            if (valShort == "")
-            {
-                Config.TaskbarLabel = "";
-            }
-            else if (valShort == " ")
-            {
-                Config.TaskbarLabel = " ";
-            }
-            else
-            {
-                 // 如果等于默认值，或者等于当前的动态简称，则存为空字符串 (恢复自动模式)
-                if (valShort == defShort || valShort == currentDynamicShort)
-                    Config.TaskbarLabel = "";
-                else
-                    Config.TaskbarLabel = valShort;
-            }
-            
-            // 最终赋值 (逻辑已在上方处理完毕)
-            // 无需再次检查，直接使用计算好的 valShort 即可
-            // (注意：上方的 if/else 块已经给 Config.TaskbarLabel 赋值了，这里需要移除多余的旧代码)
-
-            // ★★★ 核心修改：保存单位逻辑 ★★★
-            string rawUnit = _inputUnit.Inner.Text; // 【关键】不使用 Trim()，保留用户输入的空格
-            
-            // 获取当前模式下的默认单位，用于对比
-            // 保存时同样需要对比 Settings 上下文下的默认值 (因为输入框显示的是 Settings 格式)
-            var unitCtx = _isTaskbarMode ? MetricUtils.UnitContext.SettingsTaskbar : MetricUtils.UnitContext.SettingsPanel;
-            string defUnit = MetricUtils.GetUnitStr(Config.Key, 0, unitCtx);
-            string finalVal;
-
-            if (string.IsNullOrEmpty(rawUnit)) 
-            {
-                // 情况1：用户清空输入框 -> 恢复默认 (Auto/null)
-                finalVal = null;
-            }
-            else if (string.IsNullOrWhiteSpace(rawUnit))
-            {
-                // 情况2：用户只输入了空格 (" ") -> 强制不显示 ("")
-                // 这里的逻辑必须保留：纯空格意味着用户想隐藏单位
-                finalVal = "";
-            }
-            else
-            {
-                string val = rawUnit; // 已经是原始值了
-
-                // 情况3：用户输入了内容
-                // 【关键】使用 Ordinal 区分大小写。
-                // 如果用户输入 "{u}/S"，不等于默认的 "{u}/s"，会作为自定义值保存。
-                if (string.Equals(val, defUnit, StringComparison.Ordinal))
-                    finalVal = null;
-                else
-                    finalVal = val;
-            }
-
-            if (_isTaskbarMode) Config.UnitTaskbar = finalVal;
-            else Config.UnitPanel = finalVal;
-
-            Config.VisibleInPanel = _chkPanel.Checked;
-            Config.VisibleInTaskbar = _chkTaskbar.Checked;
         }
     }
 

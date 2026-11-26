@@ -6,7 +6,7 @@
 A lightweight and customizable desktop hardware monitoring tool — real-time monitoring of system performance such as CPU, GPU, memory, disk, and network.
 
 支持横/竖屏/任务栏/网页显示、主题切换、多语言、透明度显示、三色报警等，界面简洁且高度可配置 。
-> 🟢 **立即下载最新版本：** [📦 GitHub Releases → LiteMonitor 最新版](https://github.com/Diorser/LiteMonitor/releases/latest)    /  [⏬国内镜像网站下载](https://litemonitor.cn/)    
+> 🟢 **立即下载最新版本：** [📦 GitHub Releases → LiteMonitor 最新版](https://github.com/firmme/LiteMonitor/releases/latest)
 
 > 🟢 已支持【内存清理】和【自定义插件】功能，详见：[插件开发指南（无需编程）](./resources/plugins/PLUGIN_DEV_GUIDE.md#🔌-plugin-system)
 
@@ -33,7 +33,7 @@ A lightweight and customizable desktop hardware monitoring tool — real-time mo
 
 
 
-> 💡 LiteMonitor 持续完善中，如需更多监控项或功能支持，欢迎在 [GitHub Issues](https://github.com/Diorser/LiteMonitor/issues) 中反馈建议！
+> 💡 LiteMonitor 持续完善中，如需更多监控项或功能支持，欢迎在 [GitHub Issues](https://github.com/firmme/LiteMonitor/issues) 中反馈建议！
 
 ---
 
@@ -48,7 +48,7 @@ A lightweight and customizable desktop hardware monitoring tool — real-time mo
 ![LiteMonitor 主题编辑器](./resources/screenshots/overview7.png)
 
 ###  🟢 网页版监控
-![LiteMonitor 网页版监控](./resources/screenshots/web.png)
+网页版默认仅本机访问。在「设置 → 主界面 → 网页监控」中可打开或复制地址。跨设备访问可选「网络访问（HTTPS）」，填写 Windows「个人」证书存储中 HTTPS 证书的指纹和访问密码。其他设备需能解析证书的主机名，并信任证书签发方。
  
 ---
 
@@ -70,7 +70,7 @@ A lightweight and customizable desktop hardware monitoring tool — real-time mo
 | 👆 鼠标穿透模式 | 启用后，窗口不拦截鼠标事件，可直接操作背后应用。 |
 | 🎨 UI 与主题即时切换 | 切换主题/语言后界面即时刷新，无需重启。 |
 | 🔍 数值智能格式化 | 自动格式化单位与小数位，横屏模式支持智能“/s”去除、>=100 自动取整等。 |
-| 🔄 自动更新检测 | 启动时静默检查新版本，手动检查时展示弹窗。支持国内与 GitHub 双源。 |
+| 🔄 自动更新检测 | 启动时静默检查新版本，手动检查时展示弹窗。通过本仓库 GitHub Releases 检测，安装前校验发布签名。 |
 | 🚀 开机自启 | 通过计划任务方式实现管理员级别自启动。 |
 | 📂 配置文件存储 | 所有设置实时写入 `settings.json`，支持迁移与备份。 |
 
@@ -78,7 +78,7 @@ A lightweight and customizable desktop hardware monitoring tool — real-time mo
 
 ## 📦 安装与使用
 
-1. 前往 [Releases 页面](https://github.com/Diorser/LiteMonitor/releases) 下载最新版压缩包  
+1. 前往 [Releases 页面](https://github.com/firmme/LiteMonitor/releases) 下载最新版压缩包
 2. 解压后运行 `LiteMonitor.exe`  
 3. 程序会自动根据系统语言加载对应语言文件
 
@@ -146,7 +146,7 @@ A lightweight and customizable desktop hardware monitoring tool — real-time mo
 | `LanguageManager.cs` | 多语言加载、扁平化 Key 访问 |
 | `HardwareMonitor.cs` | 采集 CPU/GPU/MEM/NET/DISK 信息；自动/手动设备选择 |
 | `AutoStart.cs` | 管理计划任务，实现开机自启 |
-| `UpdateChecker.cs` | GitHub + 国内双源版本检测 |
+| `UpdateChecker.cs` | 从当前仓库检查 GitHub Release |
 | `AboutForm.cs` | 关于窗口 |
 
 ---
@@ -160,7 +160,7 @@ A lightweight and customizable desktop hardware monitoring tool — real-time mo
 
 ### 编译命令
 ```bash
-git clone https://github.com/Diorser/LiteMonitor.git
+git clone https://github.com/firmme/LiteMonitor.git
 cd LiteMonitor
 dotnet build -c Release
 ```
@@ -179,4 +179,10 @@ dotnet build -c Release
 
 ## 📬 联系方式
 **作者**：Diorser  
-**项目主页**：[https://github.com/Diorser/LiteMonitor](https://github.com/Diorser/LiteMonitor)
+**项目主页**：[https://github.com/firmme/LiteMonitor](https://github.com/firmme/LiteMonitor)
+
+## 发布更新
+
+使用 PowerShell 7 运行 build/New-SignedRelease.ps1，传入 Version 和 CertificateThumbprint。证书应存放在当前 Windows 用户的「个人」存储中，并与 resources/update-public-key.pem 匹配。脚本生成 ZIP 和同名 .sig 文件。
+
+将两个文件作为同一 vX.Y.Z 标签的 GitHub Release 资产发布。首次从旧版迁移时，通过 GitHub 手动安装新版。之后使用该公钥的客户端可自动验证并安装已签名的更新。

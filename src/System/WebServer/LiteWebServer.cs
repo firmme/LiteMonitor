@@ -1,115 +1,155 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
-using System.Text.RegularExpressions;
-using System.Text.Json; // [Fix] Added missing using
-using System.Buffers; // [Optimization] Use ArrayPool
+using System.Text.Json;
 using LiteMonitor.src.Core;
 using LiteMonitor.src.SystemServices;
 using LiteMonitor.src.SystemServices.InfoService;
-using System.Diagnostics;
 
 namespace LiteMonitor.src.WebServer
 {
-    public class LiteWebServer : IDisposable
+    public sealed class LiteWebServer : IDisposable
     {
-        private TcpListener? _listener;
-        private volatile bool _isRunning = false;
-        private int _currentRunningPort = -1;
-
-        public string CurrentPassword { get;set; }
-
+        private static readonly long StartedAt = Stopwatch.GetTimestamp();
         private readonly Settings _cfg;
-        
-        // [Refactor] Decoupled WebSocket Logic
-        private readonly WebSessionManager _sessionManager;
-        
-        public static LiteWebServer? Instance { get; private set; }
+        private WebSessionManager? _sessions;
+        private (int Port, bool Network, string Thumbprint, string Password, string Language)? _runningOptions;
+        private volatile int _currentRunningPort = -1;
 
-        public bool IsRunning => _isRunning;
-        public int CurrentRunningPort => _isRunning ? _currentRunningPort : -1;
+        public static LiteWebServer? Instance { get; private set; }
+        public bool IsRunning => _sessions != null;
+        public int CurrentRunningPort => _currentRunningPort;
+        public Uri? Address { get; private set; }
+        public string? LastError { get; private set; }
 
         public LiteWebServer(Settings cfg)
         {
             _cfg = cfg;
             Instance = this;
-            // Initialize WebSocket Manager with the data provider delegate
-            _sessionManager = new WebSessionManager(WriteSnapshotJson);
         }
 
-        public bool Start(out string errorMsg)
+        public bool Start(out string error)
         {
-            errorMsg = "";
-            if (_isRunning) return true;
-            if (!_cfg.WebServerEnabled) return true;
+            error = "";
+            var options = (_cfg.WebServerPort, _cfg.WebServerNetworkAccess,
+                _cfg.WebServerCertificateThumbprint ?? "", _cfg.WebServerPassword ?? "", _cfg.Language);
+            if (!_cfg.WebServerEnabled)
+            {
+                Stop();
+                return true;
+            }
+            if (_runningOptions == options)
+            {
+                LastError = null;
+                return true;
+            }
 
+            TcpListener? listener = null;
+            X509Certificate2? certificate = null;
             try
             {
-                int port = _cfg.WebServerPort;
+                ValidateConfiguration(_cfg, out certificate, out string host);
+                Stop();
 
-                try
+                if (options.WebServerNetworkAccess && Socket.OSSupportsIPv6)
                 {
-                    // [Fix] 优先尝试绑定 IPv6Any 并开启 DualMode，以同时支持 IPv4 和 IPv6
-                    _listener = new TcpListener(IPAddress.IPv6Any, port);
-                    _listener.Server.DualMode = true;
-                    _listener.Start();
+                    listener = new TcpListener(IPAddress.IPv6Any, options.WebServerPort);
+                    listener.Server.DualMode = true;
                 }
-                catch (Exception)
+                else
                 {
-                    // 如果系统不支持 IPv6，回退到 IPv4
-                    _listener = new TcpListener(IPAddress.Any, port);
-                    _listener.Start();
+                    listener = new TcpListener(options.WebServerNetworkAccess ? IPAddress.Any : IPAddress.Loopback,
+                        options.WebServerPort);
                 }
+                listener.Server.ExclusiveAddressUse = true;
+                listener.Start(backlog: 32);
 
-                _isRunning = true;
-                _currentRunningPort = port;
-                CurrentPassword = _cfg.WebServerPassword;
-
-                // 1. 启动监听连接的循环
-                Task.Run(ListenLoop);
-                
-                // 2. 启动 WebSocket 管理器 (广播循环在内部)
-                _sessionManager.Start();
-                
+                _currentRunningPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+                Address = new UriBuilder(certificate == null ? "http" : "https", host, _currentRunningPort).Uri;
+                _sessions = new WebSessionManager(WriteSnapshotJson, certificate,
+                    certificate == null ? null : host, certificate == null ? null : options.Item4, _cfg.Language);
+                _sessions.Start(listener);
+                _runningOptions = options;
+                LastError = null;
                 return true;
             }
             catch (Exception ex)
             {
-                errorMsg = ex.Message;
-                Debug.WriteLine("WebServer Start Error: " + ex.Message);
+                listener?.Stop();
+                certificate?.Dispose();
+                error = LastError = ex.Message;
+                Debug.WriteLine($"[Web server] {ex}");
                 return false;
             }
         }
 
+        internal static string? Validate(Settings settings)
+        {
+            if (!settings.WebServerEnabled) return null;
+            try
+            {
+                ValidateConfiguration(settings, out var certificate, out _);
+                certificate?.Dispose();
+                return null;
+            }
+            catch (Exception ex) { return ex.Message; }
+        }
+
+        private static void ValidateConfiguration(Settings settings, out X509Certificate2? certificate, out string host)
+        {
+            certificate = null;
+            host = "127.0.0.1";
+            bool chinese = settings.Language is "zh" or "zh-tw";
+            if (settings.WebServerPort is < 1 or > 65535)
+                throw new InvalidOperationException(chinese ? "端口应为 1–65535。" : "Enter a port between 1 and 65535.");
+            if (!settings.WebServerNetworkAccess) return;
+
+            string password = settings.WebServerPassword ?? "";
+            if (password.Length < 12 || string.IsNullOrWhiteSpace(password) || Encoding.UTF8.GetByteCount(password) > 1024)
+                throw new InvalidOperationException(chinese ? "网络访问密码至少需要 12 个字符。" : "Network access requires a password of at least 12 characters.");
+
+            string thumbprint = string.Concat((settings.WebServerCertificateThumbprint ?? "")
+                .Where(c => !char.IsWhiteSpace(c) && c != '\u200e')).ToUpperInvariant();
+            if (thumbprint.Length != 40 || !thumbprint.All(Uri.IsHexDigit))
+                throw new InvalidOperationException(chinese ? "请输入 HTTPS 证书的指纹。" : "Enter the HTTPS certificate thumbprint.");
+
+            foreach (var location in new[] { StoreLocation.CurrentUser, StoreLocation.LocalMachine })
+            {
+                using var store = new X509Store(StoreName.My, location);
+                store.Open(OpenFlags.ReadOnly | OpenFlags.OpenExistingOnly);
+                var matches = store.Certificates.Find(X509FindType.FindByThumbprint, thumbprint, validOnly: false);
+                foreach (var match in matches)
+                {
+                    string name = match.GetNameInfo(X509NameType.DnsName, forIssuer: false);
+                    if (certificate == null && match.HasPrivateKey && match.NotBefore <= DateTime.Now &&
+                        match.NotAfter > DateTime.Now && Uri.CheckHostName(name) is UriHostNameType.Dns or UriHostNameType.IPv4)
+                    {
+                        certificate = match;
+                        host = name;
+                    }
+                    else match.Dispose();
+                }
+                if (certificate != null) return;
+            }
+
+            throw new InvalidOperationException(chinese ? "找不到有效的 HTTPS 证书。请检查证书名称、有效期和私钥。" :
+                "No usable HTTPS certificate found. Check its host name, validity and private key.");
+        }
+
         public void Stop()
         {
-            _isRunning = false;
+            var sessions = _sessions;
+            _sessions = null;
+            _runningOptions = null;
             _currentRunningPort = -1;
-            try { _listener?.Stop(); } catch { }
-            
-            // 停止 WebSocket 管理器
-            _sessionManager.Stop();
+            Address = null;
+            LastError = null;
+            sessions?.Dispose();
         }
 
-        public void Dispose()
-        {
-            Stop();
-        }
-
-        private async Task ListenLoop()
-        {
-            while (_isRunning && _listener != null)
-            {
-                try
-                {
-                    var client = await _listener.AcceptTcpClientAsync();
-                    // [Refactor] All connection handling logic moved to WebSessionManager (now serving as unified ConnectionManager)
-                    _ = _sessionManager.HandleClientAsync(client);
-                }
-                catch (ObjectDisposedException) { break; }
-                catch (Exception ex) { Debug.WriteLine(ex.Message); }
-            }
-        }
+        public void Dispose() => Stop();
 
         private void WriteSnapshotJson(Utf8JsonWriter writer)
         {
@@ -125,7 +165,7 @@ namespace LiteMonitor.src.WebServer
             List<MonitorItemConfig> itemsCopy;
             Dictionary<string, int> groupIndices = new Dictionary<string, int>();
             
-            lock (_cfg.MonitorItems)
+            lock (_cfg.MonitorItemsLock)
             {
                 // ★★★ 修复：复用主界面 (Panel模式) 的排序逻辑 ★★★
                 itemsCopy = _cfg.MonitorItems
@@ -153,7 +193,7 @@ namespace LiteMonitor.src.WebServer
             writer.WriteStartObject("sys");
             writer.WriteString("ip", localIp);
             writer.WriteNumber("port", _currentRunningPort);
-            writer.WriteString("uptime", (DateTime.Now - Process.GetCurrentProcess().StartTime).ToString(@"hh\:mm\:ss"));
+            writer.WriteString("uptime", Stopwatch.GetElapsedTime(StartedAt).ToString(@"d\.hh\:mm\:ss"));
             writer.WriteEndObject();
 
             // "items" array
@@ -181,6 +221,12 @@ namespace LiteMonitor.src.WebServer
                 // [Optimization] Use cached keys
                 string groupsKey = !string.IsNullOrEmpty(item.CachedGroupsKey) ? item.CachedGroupsKey : UIUtils.Intern("Groups." + item.UIGroup);
                 string groupDisplay = LanguageManager.T(groupsKey);
+                if (groupDisplay == LanguageManager.GetOriginal(groupsKey) && groupDisplay.Length != 0)
+                {
+                    string prefix = System.Globalization.StringInfo.GetNextTextElement(groupDisplay);
+                    if (Rune.GetUnicodeCategory(Rune.GetRuneAt(prefix, 0)) == System.Globalization.UnicodeCategory.OtherSymbol)
+                        groupDisplay = groupDisplay[prefix.Length..].TrimStart();
+                }
 
                 string valStr = "";
                 string unit = "";
@@ -214,20 +260,17 @@ namespace LiteMonitor.src.WebServer
                     // 布局顺序问题已由 CSS order (gidx) 机制解决，即使数据晚到也会插入正确位置
                     if (!val.HasValue) continue;
 
-                    if (val.HasValue)
-                    {
-                        // [Refactor] 使用 MetricUtils 统一格式化逻辑，确保与桌面端完全一致 (包括单位换算、颜色阈值、内存显示模式)
-                        valStr = MetricUtils.GetValueStr(item.Key, val.Value, false, item.UnitPanel); // false = Panel Context (Standard)
-                        string calculatedUnit = MetricUtils.GetUnitStr(item.Key, val.Value, MetricUtils.UnitContext.Panel);
-                        unit = MetricUtils.GetDisplayUnit(item.Key, calculatedUnit, item.UnitPanel);
-                        
-                        // GetProgressValue 返回 0.0-1.0，Web端通常需要 0-100
-                        pct = MetricUtils.GetProgressValue(item.Key, val.Value) * 100.0;
-                        
-                        // 状态判断 (0=Safe, 1=Warn, 2=Crit)
-                        status = MetricUtils.GetState(item.Key, val.Value);
-                    }
-                
+                    // [Refactor] 使用 MetricUtils 统一格式化逻辑，确保与桌面端完全一致 (包括单位换算、颜色阈值、内存显示模式)
+                    valStr = MetricUtils.GetValueStr(item.Key, val.Value, false, item.UnitPanel); // false = Panel Context (Standard)
+                    string calculatedUnit = MetricUtils.GetUnitStr(item.Key, val.Value, MetricUtils.UnitContext.Panel);
+                    unit = MetricUtils.GetDisplayUnit(item.Key, calculatedUnit, item.UnitPanel);
+
+                    // GetProgressValue 返回 0.0-1.0，Web端通常需要 0-100
+                    pct = MetricUtils.GetProgressValue(item.Key, val.Value) * 100.0;
+
+                    // 状态判断 (0=Safe, 1=Warn, 2=Crit)
+                    status = MetricUtils.GetState(item.Key, val.Value);
+
                     // Primary Logic
                     if (item.Key == "BAT.Percent") isPrimary = true;
                     else if (item.Key == "CPU.Load") isPrimary = true;
@@ -247,8 +290,8 @@ namespace LiteMonitor.src.WebServer
                 writer.WriteNumber("gidx", groupIndices.TryGetValue(item.UIGroup, out int idx) ? idx : 999);
                 writer.WriteString("v", valStr);
                 writer.WriteString("u", unit);
-                writer.WriteNumber("pct", pct);
-                writer.WriteNumber("sts", status);
+                writer.WriteNumber("pct", double.IsFinite(pct) ? Math.Clamp(pct, 0, 100) : 0);
+                writer.WriteNumber("sts", Math.Clamp(status, 0, 2));
                 writer.WriteBoolean("primary", isPrimary);
                 writer.WriteEndObject();
             }

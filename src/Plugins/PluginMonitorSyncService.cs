@@ -37,7 +37,7 @@ namespace LiteMonitor.src.Plugins
             var validKeys = new HashSet<string>();
 
             // 优化 2: 高风险并发崩溃修复 - 加锁
-            lock (settings.MonitorItems)
+            lock (settings.MonitorItemsLock)
             {
                 for (int i = 0; i < targets.Count; i++)
                 {
@@ -163,16 +163,11 @@ namespace LiteMonitor.src.Plugins
         {
             var settings = Settings.Load();
             string mainKey = PluginConstants.DASH_PREFIX + instanceId;
-            var itemsToRemove = settings.MonitorItems.Where(x => x.Key == mainKey || x.Key.StartsWith(mainKey + ".")).ToList();
-
-            if (itemsToRemove.Count > 0)
-            {
-                foreach (var item in itemsToRemove)
-                {
-                    settings.MonitorItems.Remove(item);
-                }
-                if (saveIfChanged) settings.Save();
-            }
+            int removed;
+            lock (settings.MonitorItemsLock)
+                removed = settings.MonitorItems.RemoveAll(item =>
+                    item.Key == mainKey || item.Key.StartsWith(mainKey + ".", StringComparison.Ordinal));
+            if (removed > 0 && saveIfChanged) settings.Save();
         }
 
         /// <summary>
